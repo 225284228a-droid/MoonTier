@@ -120,7 +120,7 @@ Java_cn_moonflow_easytier_NativeEasyTier_collectNetworkInfos(JNIEnv *env, jclass
     std::lock_guard<std::mutex> lock(ffiMutex);
     const int count = collect_network_infos(infos.data(), infos.size());
     if (count < 0)
-        return env->NewStringUTF("{}");
+        return nullptr;
     const int boundedCount = std::min(count, maxLength);
 
     std::ostringstream json;

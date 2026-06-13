@@ -4,7 +4,6 @@ import java.net.URI
 import kotlin.math.min
 
 object Ipv4 {
-    private const val FULL_IPV4_RANGE = 0x100000000L  // 1L shl 32, represents the full IPv4 address space
     private val nonPublic = listOf(
         "0.0.0.0/8",
         "10.0.0.0/8",
@@ -87,7 +86,7 @@ object Ipv4 {
     private fun appendRange(start: Long, end: Long, out: MutableList<String>) {
         var current = start
         while (current <= end) {
-            var block = if (current == 0L) FULL_IPV4_RANGE else current and -current
+            var block = if (current == 0L) 1L shl 32 else current and -current
             val remaining = end - current + 1
             while (block > remaining) block = block ushr 1
             var prefix = 32

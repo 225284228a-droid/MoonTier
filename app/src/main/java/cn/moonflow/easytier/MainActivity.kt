@@ -163,6 +163,7 @@ class MainActivity : ComponentActivity() {
         store = ConfigStore(applicationContext)
         controller = EasyTierController(applicationContext, store, ::requestVpn)
 
+        window.attributes = window.attributes.apply { preferredRefreshRate = 120f }
 
         setContent {
             MoonTierApp(
