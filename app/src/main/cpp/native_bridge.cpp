@@ -134,7 +134,7 @@ Java_cn_moonflow_easytier_NativeEasyTier_collectNetworkInfos(JNIEnv *env, jclass
         first = false;
         json << "\"" << jsonEscape(infos[static_cast<size_t>(i)].key) << "\":";
         if (infos[static_cast<size_t>(i)].value)
-            json << "\"" << jsonEscape(infos[static_cast<size_t>(i)].value) << "\"";
+            json << infos[static_cast<size_t>(i)].value;
         else
             json << "null";
     }

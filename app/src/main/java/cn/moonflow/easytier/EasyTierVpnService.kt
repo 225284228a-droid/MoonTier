@@ -13,7 +13,6 @@ import org.json.JSONObject
 
 class EasyTierVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var shutdown = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -121,8 +120,6 @@ class EasyTierVpnService : VpnService() {
     }
 
     private fun shutdownVpn() {
-        if (shutdown) return
-        shutdown = true
         disconnect()
         NativeEasyTier.stopAllInstances()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -140,11 +137,7 @@ class EasyTierVpnService : VpnService() {
             manager.createNotificationChannel(channel)
         }
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-        val pendingIntent = if (launchIntent != null) {
-            PendingIntent.getActivity(this, 0, launchIntent, PendingIntent.FLAG_IMMUTABLE)
-        } else {
-            null
-        }
+        val pendingIntent = PendingIntent.getActivity(this, 0, launchIntent, PendingIntent.FLAG_IMMUTABLE)
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -155,7 +148,7 @@ class EasyTierVpnService : VpnService() {
             .setContentTitle("MoonTier")
             .setContentText("VPN 正在运行")
             .setSmallIcon(android.R.drawable.ic_menu_share)
-            .apply { if (pendingIntent != null) setContentIntent(pendingIntent) }
+            .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
     }
