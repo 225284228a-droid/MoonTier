@@ -63,8 +63,8 @@ class ConfigStore(private val context: Context) {
         saveConfigs(loadConfigs().map { it.copy(isDefault = it.id == id) })
     }
 
-    fun loadDefaultConfig(): NetworkConfig =
-        loadConfigs().firstOrNull { it.isDefault } ?: loadConfigs().first()
+    fun loadDefaultConfig(): NetworkConfig? =
+        loadConfigs().firstOrNull { it.isDefault }
 
     @Synchronized
     fun loadSettings(): AppSettings {
@@ -119,7 +119,8 @@ class ConfigStore(private val context: Context) {
         }
 
     private fun normalizeConfigs(configs: List<NetworkConfig>): List<NetworkConfig> {
-        val list = if (configs.isEmpty()) listOf(NetworkConfig.defaultConfig()) else configs
+        if (configs.isEmpty()) return emptyList()
+        val list = configs
         val defaultId = list.firstOrNull { it.isDefault }?.id ?: list.first().id
         val usedInstances = HashSet<String>()
         return list.mapIndexed { index, cfg ->

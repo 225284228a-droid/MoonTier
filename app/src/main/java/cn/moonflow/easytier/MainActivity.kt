@@ -44,6 +44,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -95,6 +96,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
@@ -281,7 +283,7 @@ private fun MoonTierApp(
         settings = store.loadSettings()
     }
 
-    DisposableEffect(Unit) {
+    LaunchedEffect(Unit) {
         bindImportHandler(
             { cfg ->
                 store.saveConfig(cfg.copy(id = java.util.UUID.randomUUID().toString(), isDefault = configs.isEmpty()))
@@ -290,7 +292,6 @@ private fun MoonTierApp(
             },
             { title, body -> dialog = title to body }
         )
-        onDispose { }
     }
 
     LaunchedEffect(Unit) {
@@ -474,6 +475,21 @@ private fun MainTabs(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
+                .pointerInput(selectedTab) {
+                    var offsetX = 0f
+                    detectHorizontalDragGestures(
+                        onDragEnd = {
+                            if (offsetX < -150f && selectedTab < tabs.size - 1) {
+                                onTab(selectedTab + 1)
+                            } else if (offsetX > 150f && selectedTab > 0) {
+                                onTab(selectedTab - 1)
+                            }
+                            offsetX = 0f
+                        },
+                        onDragCancel = { offsetX = 0f },
+                        onHorizontalDrag = { _, amount -> offsetX += amount }
+                    )
+                }
         ) {
             AnimatedContent(
                 targetState = selectedTab,
@@ -1130,135 +1146,6 @@ private fun ConfigEditorScreenV2(
                 serverPicker = null
             }
         )
-    }
-}
-
-@Composable
-private fun ConfigEditorScreen(
-    palette: Palette,
-    initial: NetworkConfig,
-    userServers: List<ServerEntry>,
-    onBack: () -> Unit,
-    onSave: (NetworkConfig) -> Unit,
-    onExport: (NetworkConfig) -> Unit
-) {
-    var cfg by remember(initial.id) { mutableStateOf(initial) }
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .statusBarsPadding()
-            .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 10.dp, bottom = 30.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Rounded.Close, null, tint = palette.text)
-                }
-                Header("编辑配置", cfg.displayName, palette, modifier = Modifier.weight(1f))
-            }
-        }
-        item {
-            QCard(palette) {
-                FormLabel("基础")
-                QTextField(cfg.label, "配置名称", palette) { cfg = cfg.copy(label = it) }
-                Spacer(Modifier.height(8.dp))
-                QTextField(cfg.instanceName, "实例名称", palette) { cfg = cfg.copy(instanceName = it) }
-                Spacer(Modifier.height(8.dp))
-                QTextField(cfg.networkName, "网络名称", palette) { cfg = cfg.copy(networkName = it) }
-                Spacer(Modifier.height(8.dp))
-                QTextField(cfg.networkSecret, "网络密码", palette, password = true) { cfg = cfg.copy(networkSecret = it) }
-                Spacer(Modifier.height(8.dp))
-                QTextField(cfg.hostname, "主机名", palette) { cfg = cfg.copy(hostname = it) }
-                Spacer(Modifier.height(8.dp))
-                SwitchRow("DHCP 自动分配虚拟 IP", cfg.dhcp, palette) { cfg = cfg.copy(dhcp = it) }
-                AnimatedVisibility(!cfg.dhcp) {
-                    Column {
-                        Spacer(Modifier.height(8.dp))
-                        QTextField(cfg.ipv4, "虚拟 IPv4，例如 10.126.126.2", palette) { cfg = cfg.copy(ipv4 = it) }
-                    }
-                }
-            }
-        }
-        item {
-            QCard(palette) {
-                ListEditor(
-                    title = "服务器",
-                    values = cfg.peerUrls,
-                    placeholder = "tcp://server.example.com:11010",
-                    palette = palette,
-                    quickAdd = userServers.map { it.address },
-                    onValues = { cfg = cfg.copy(peerUrls = it) }
-                )
-            }
-        }
-        item {
-            QCard(palette) {
-                ListEditor("监听地址", cfg.listenerUrls, "tcp://0.0.0.0:11010", palette) {
-                    cfg = cfg.copy(listenerUrls = it)
-                }
-            }
-        }
-        item {
-            QCard(palette) {
-                ListEditor("代理子网", cfg.proxyCidrs, "192.168.1.0/24", palette) {
-                    cfg = cfg.copy(proxyCidrs = it)
-                }
-            }
-        }
-        item {
-            QCard(palette) {
-                SwitchRow("启用手动路由", cfg.enableManualRoutes, palette) { cfg = cfg.copy(enableManualRoutes = it) }
-                AnimatedVisibility(cfg.enableManualRoutes) {
-                    Column(Modifier.padding(top = 10.dp)) {
-                        ListEditor("手动路由", cfg.routes, "10.0.0.0/8", palette) {
-                            cfg = cfg.copy(routes = it)
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                ListEditor("出口节点列表", cfg.exitNodes, "10.126.126.1", palette) {
-                    cfg = cfg.copy(exitNodes = it)
-                }
-            }
-        }
-        item {
-            QCard(palette) {
-                FormLabel("功能")
-                SwitchRow("允许本机成为出口节点", cfg.enableExitNode, palette) { cfg = cfg.copy(enableExitNode = it) }
-                SwitchRow("启用 Magic DNS", cfg.enableMagicDns, palette) { cfg = cfg.copy(enableMagicDns = it) }
-                SwitchRow("私有网络模式", cfg.enablePrivateMode, palette) { cfg = cfg.copy(enablePrivateMode = it) }
-                SwitchRow("启用加密", cfg.enableEncryption, palette) { cfg = cfg.copy(enableEncryption = it) }
-                SwitchRow("启用 KCP 代理", cfg.enableKcpProxy, palette) { cfg = cfg.copy(enableKcpProxy = it) }
-                SwitchRow("延迟优先", cfg.latencyFirst, palette) { cfg = cfg.copy(latencyFirst = it) }
-                SwitchRow("无 TUN 模式", cfg.noTun, palette) { cfg = cfg.copy(noTun = it) }
-            }
-        }
-        item {
-            QCard(palette) {
-                FormLabel("转发和白名单")
-                SwitchRow("系统转发代理子网", cfg.proxyForwardBySystem, palette) { cfg = cfg.copy(proxyForwardBySystem = it) }
-                SwitchRow("启用中继网络白名单", cfg.enableRelayNetworkWhitelist, palette) {
-                    cfg = cfg.copy(enableRelayNetworkWhitelist = it)
-                }
-                AnimatedVisibility(cfg.enableRelayNetworkWhitelist) {
-                    Column(Modifier.padding(top = 10.dp)) {
-                        ListEditor("中继网络白名单", cfg.relayNetworkWhitelist, "network-name", palette) {
-                            cfg = cfg.copy(relayNetworkWhitelist = it)
-                        }
-                    }
-                }
-            }
-        }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                QButton("保存", palette, Modifier.weight(1f), icon = Icons.Rounded.Check) { onSave(cfg) }
-                QButton("不保存", palette, Modifier.weight(1f), primary = false) { onBack() }
-            }
-            Spacer(Modifier.height(8.dp))
-            QButton("导出", palette, Modifier.fillMaxWidth(), primary = false) { onExport(cfg) }
-        }
     }
 }
 
