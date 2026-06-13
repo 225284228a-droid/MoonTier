@@ -4,6 +4,7 @@ object TomlCodec {
     fun build(config: NetworkConfig): String {
         val out = ArrayList<String>()
         out += "instance_id = \"${esc(config.id)}\""
+        out += "network_label = \"${esc(config.label)}\""
         out += "instance_name = \"${esc(config.instanceName)}\""
         if (config.hostname.isNotBlank()) out += "hostname = \"${esc(config.hostname)}\""
         out += "dhcp = ${config.dhcp}"

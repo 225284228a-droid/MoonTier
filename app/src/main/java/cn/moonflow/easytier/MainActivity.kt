@@ -120,8 +120,11 @@ class MainActivity : ComponentActivity() {
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        val vpnConfig = pendingVpnConfig
         if (result.resultCode == Activity.RESULT_OK) {
-            pendingVpnConfig?.let { startVpnServiceWith(it) }
+            vpnConfig?.let { startVpnServiceWith(it) }
+        } else if (vpnConfig != null) {
+            controller.onVpnPermissionDenied()
         }
         pendingVpnConfig = null
     }
@@ -292,6 +295,7 @@ private fun MoonTierApp(
     }
 
     LaunchedEffect(Unit) {
+        controller.attachIfRunning(configs)
         if (settings.autoSyncOfficialServers) {
             runCatching { store.syncOfficialServers() }
                 .onSuccess { officialServers = store.loadOfficialServers() }
@@ -740,7 +744,6 @@ private fun ServersPage(
         item {
             QButton("新增收藏", palette, Modifier.fillMaxWidth(), icon = Icons.Rounded.Add) {
                 editable = editable + ServerEntry(nextServerName(editable), "")
-                onSaveUserServers(editable)
             }
         }
         item {
@@ -757,8 +760,9 @@ private fun ServersPage(
                             placeholder = "名称",
                             palette = palette,
                             onValueChange = {
-                                editable = editable.replaceAt(index, server.copy(name = it))
-                                onSaveUserServers(editable)
+                                val next = editable.replaceAt(index, server.copy(name = it))
+                                editable = next
+                                if (next[index].address.isNotBlank()) onSaveUserServers(next)
                             }
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -768,13 +772,15 @@ private fun ServersPage(
                                 palette = palette,
                                 modifier = Modifier.weight(1f),
                                 onValueChange = {
-                                    editable = editable.replaceAt(index, server.copy(address = it))
-                                    onSaveUserServers(editable)
+                                    val next = editable.replaceAt(index, server.copy(address = it))
+                                    editable = next
+                                    if (it.isNotBlank()) onSaveUserServers(next)
                                 }
                             )
                             IconButton(onClick = {
-                                editable = editable.filterIndexed { i, _ -> i != index }
-                                onSaveUserServers(editable)
+                                val next = editable.filterIndexed { i, _ -> i != index }
+                                editable = next
+                                onSaveUserServers(next)
                             }) {
                                 Icon(Icons.Rounded.Delete, null, tint = palette.error)
                             }

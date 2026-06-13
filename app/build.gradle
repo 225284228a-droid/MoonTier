@@ -4,65 +4,65 @@ plugins {
 }
 
 android {
-    namespace "cn.moonflow.easytier"
-    compileSdk 36
-    ndkVersion "27.2.12479018"
+    namespace = "cn.moonflow.easytier"
+    compileSdk = 36
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId "cn.moonflow.easytier"
-        minSdk 24
-        targetSdk 36
-        versionCode 1
-        versionName "1.0.0"
+        applicationId = "cn.moonflow.easytier"
+        minSdk = 24
+        targetSdk = 36
+        versionCode = 1
+        versionName = "1.0.0"
 
         ndk {
-            abiFilters "arm64-v8a"
+            abiFilters.add("arm64-v8a")
         }
 
         externalNativeBuild {
             cmake {
-                cppFlags "-std=c++17"
+                cppFlags.add("-std=c++17")
             }
         }
     }
 
     signingConfigs {
         release {
-            storeFile file("../qtet-release.keystore")
-            storePassword "REMOVED_PRIVATE_SIGNING_PASSWORD"
-            keyAlias "qtet"
-            keyPassword "REMOVED_PRIVATE_SIGNING_PASSWORD"
+            storeFile = file("../qtet-release.keystore")
+            storePassword = "REMOVED_PRIVATE_SIGNING_PASSWORD"
+            keyAlias = "qtet"
+            keyPassword = "REMOVED_PRIVATE_SIGNING_PASSWORD"
         }
     }
 
     buildTypes {
         debug {
-            signingConfig signingConfigs.release
+            signingConfig = signingConfigs.release
         }
         release {
-            signingConfig signingConfigs.release
-            minifyEnabled false
+            signingConfig = signingConfigs.release
+            minifyEnabled = false
         }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     buildFeatures {
-        compose true
+        compose = true
     }
 
     externalNativeBuild {
         cmake {
-            path "src/main/cpp/CMakeLists.txt"
+            path = file("src/main/cpp/CMakeLists.txt")
         }
     }
 
     packaging {
         jniLibs {
-            useLegacyPackaging true
+            useLegacyPackaging = true
         }
     }
 }

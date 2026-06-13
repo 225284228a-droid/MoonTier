@@ -24,6 +24,7 @@ class EasyTierVpnService : VpnService() {
         val json = intent?.getStringExtra(EXTRA_CONFIG).orEmpty()
         if (json.isBlank()) {
             shutdownVpn()
+            stopSelf()
             return START_NOT_STICKY
         }
 
@@ -32,6 +33,7 @@ class EasyTierVpnService : VpnService() {
 
         val config = runCatching { JSONObject(json) }.getOrNull()
         if (config == null) {
+            shutdownVpn()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -39,6 +41,7 @@ class EasyTierVpnService : VpnService() {
         vpnInterface = createVpnInterface(config)
         val pfd = vpnInterface
         if (pfd == null) {
+            shutdownVpn()
             stopSelf()
             return START_NOT_STICKY
         }

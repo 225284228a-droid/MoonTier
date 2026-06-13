@@ -1,6 +1,7 @@
 package cn.moonflow.easytier
 
 import android.content.Context
+import android.util.AtomicFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -27,7 +28,8 @@ class ConfigStore(private val context: Context) {
             return initial
         }
 
-        val array = runCatching { JSONArray(configsFile.readText()) }.getOrNull() ?: JSONArray()
+        val array = runCatching { JSONArray(readTextAtomic(configsFile)) }.getOrNull()
+            ?: return normalizeConfigs(emptyList())
         val configs = ArrayList<NetworkConfig>()
         for (i in 0 until array.length()) {
             val obj = array.optJSONObject(i) ?: continue
@@ -41,7 +43,7 @@ class ConfigStore(private val context: Context) {
         val normalized = normalizeConfigs(configs)
         val array = JSONArray()
         normalized.forEach { array.put(it.toJson()) }
-        configsFile.writeText(array.toString(2))
+        writeTextAtomic(configsFile, array.toString(2))
     }
 
     @Synchronized
@@ -67,13 +69,13 @@ class ConfigStore(private val context: Context) {
     @Synchronized
     fun loadSettings(): AppSettings {
         if (!settingsFile.exists()) return AppSettings()
-        val obj = runCatching { JSONObject(settingsFile.readText()) }.getOrNull() ?: JSONObject()
+        val obj = runCatching { JSONObject(readTextAtomic(settingsFile)) }.getOrNull() ?: JSONObject()
         return AppSettings.fromJson(obj)
     }
 
     @Synchronized
     fun saveSettings(settings: AppSettings) {
-        settingsFile.writeText(settings.toJson().toString(2))
+        writeTextAtomic(settingsFile, settings.toJson().toString(2))
     }
 
     @Synchronized
@@ -119,16 +121,23 @@ class ConfigStore(private val context: Context) {
     private fun normalizeConfigs(configs: List<NetworkConfig>): List<NetworkConfig> {
         val list = if (configs.isEmpty()) listOf(NetworkConfig.defaultConfig()) else configs
         val defaultId = list.firstOrNull { it.isDefault }?.id ?: list.first().id
+        val usedInstances = HashSet<String>()
         return list.mapIndexed { index, cfg ->
             val label = cfg.label.ifBlank { cfg.networkName.ifBlank { "配置 ${index + 1}" } }
-            val instance = cfg.instanceName.ifBlank { "MoonTier-${cfg.id.take(8)}" }
+            val baseInstance = cfg.instanceName.trim().ifBlank { "MoonTier-${cfg.id.take(8)}" }
+            var instance = baseInstance
+            var suffix = 1
+            while (!usedInstances.add(instance.lowercase())) {
+                instance = "$baseInstance-$suffix"
+                suffix += 1
+            }
             cfg.copy(label = label, instanceName = instance, isDefault = cfg.id == defaultId)
         }
     }
 
     private fun loadServerFile(file: File): List<ServerEntry> {
         if (!file.exists()) return emptyList()
-        val array = runCatching { JSONArray(file.readText()) }.getOrNull() ?: return emptyList()
+        val array = runCatching { JSONArray(readTextAtomic(file)) }.getOrNull() ?: return emptyList()
         val out = ArrayList<ServerEntry>()
         for (i in 0 until array.length()) {
             val item = array.optJSONObject(i) ?: continue
@@ -144,7 +153,23 @@ class ConfigStore(private val context: Context) {
             .filter { it.address.isNotBlank() }
             .distinctBy { it.address.lowercase() }
             .forEach { array.put(it.toJson()) }
-        file.writeText(array.toString(2))
+        writeTextAtomic(file, array.toString(2))
+    }
+
+    private fun readTextAtomic(file: File): String =
+        String(AtomicFile(file).readFully(), Charsets.UTF_8)
+
+    private fun writeTextAtomic(file: File, text: String) {
+        file.parentFile?.mkdirs()
+        val atomicFile = AtomicFile(file)
+        val stream = atomicFile.startWrite()
+        try {
+            stream.write(text.toByteArray(Charsets.UTF_8))
+            atomicFile.finishWrite(stream)
+        } catch (throwable: Throwable) {
+            atomicFile.failWrite(stream)
+            throw throwable
+        }
     }
 
     private fun parseServerAddresses(text: String): List<String> {
@@ -165,7 +190,11 @@ class ConfigStore(private val context: Context) {
         val trimmed = source.trim()
         require(trimmed.isNotEmpty()) { "请输入 TXT 记录域名或 URL" }
 
-        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+        if (trimmed.startsWith("http://")) {
+            throw IllegalArgumentException("服务器列表 URL 必须使用 HTTPS")
+        }
+
+        if (trimmed.startsWith("https://")) {
             val body = httpGet(trimmed, accept = "text/plain,*/*")
             if (parseServerAddresses(body).isNotEmpty()) return body
         } else {

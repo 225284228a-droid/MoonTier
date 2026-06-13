@@ -25,6 +25,7 @@ class EasyTierController(
     private var runningConfig: NetworkConfig? = null
     private var vpnSignature = ""
     private var lastLogKey = ""
+    private var missedPolls = 0
     private var directPublicIps = emptySet<String>()
 
     var state by mutableStateOf(RuntimeState())
@@ -36,13 +37,13 @@ class EasyTierController(
         scope.launch {
             if (state.running) stop(wait = true)
 
-            val normalized = config.copy(isDefault = true)
+            val normalized = config
             store.saveConfig(normalized)
-            store.setDefaultConfig(normalized.id)
             runningConfig = normalized
             directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(normalized, store) }
             vpnSignature = ""
             lastLogKey = ""
+            missedPolls = 0
             state = RuntimeState(starting = true, statusText = "正在启动 ${normalized.displayName}")
 
             val toml = TomlCodec.build(normalized)
@@ -74,10 +75,49 @@ class EasyTierController(
         scope.launch { stop(wait = false) }
     }
 
+    fun attachIfRunning(configs: List<NetworkConfig>) {
+        if (state.running || state.starting || state.stopping || pollJob != null) return
+        scope.launch {
+            val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(32).orEmpty() }
+            val outer = runCatching { JSONObject(raw) }.getOrNull() ?: return@launch
+            val config = configs.firstOrNull { outer.has(it.instanceName) } ?: configs.firstOrNull() ?: return@launch
+            runningConfig = config
+            directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(config, store) }
+            vpnSignature = ""
+            lastLogKey = ""
+            missedPolls = 0
+            state = RuntimeState(
+                running = true,
+                runningConfigId = config.id,
+                statusText = "正在恢复运行状态",
+                logs = listOf("已附着到现有 EasyTier 实例")
+            )
+            pollJob = scope.launch { pollLoop(config) }
+        }
+    }
+
+    fun onVpnPermissionDenied() {
+        scope.launch {
+            stopRuntime(
+                statusText = "VPN 授权已取消",
+                logMessage = "VPN 授权已取消，网络实例已停止",
+                wait = false
+            )
+        }
+    }
+
     private suspend fun stop(wait: Boolean) {
         if (state.running || state.starting || state.stopping) {
             state = state.copy(stopping = true, statusText = "正在停止")
         }
+        stopRuntime(
+            statusText = "EasyTier 未运行",
+            logMessage = "网络实例已停止",
+            wait = wait
+        )
+    }
+
+    private suspend fun stopRuntime(statusText: String, logMessage: String, wait: Boolean) {
         pollJob?.cancel()
         pollJob = null
         val stopIntent = Intent(context, EasyTierVpnService::class.java)
@@ -87,7 +127,9 @@ class EasyTierController(
         withContext(Dispatchers.IO) { NativeEasyTier.stopAllInstances() }
         runningConfig = null
         vpnSignature = ""
-        state = RuntimeState(statusText = "EasyTier 未运行", logs = state.logs + "网络实例已停止")
+        missedPolls = 0
+        directPublicIps = emptySet()
+        state = RuntimeState(statusText = statusText, logs = (state.logs + logMessage).takeLast(240))
         if (wait) delay(180)
     }
 
@@ -96,7 +138,11 @@ class EasyTierController(
     }
 
     private fun failStart(message: String) {
+        pollJob?.cancel()
+        pollJob = null
         runningConfig = null
+        vpnSignature = ""
+        missedPolls = 0
         state = RuntimeState(statusText = "启动失败", logs = listOf(message))
     }
 
@@ -109,14 +155,22 @@ class EasyTierController(
 
     private suspend fun pollOnce(config: NetworkConfig) {
         val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(32).orEmpty() }
-        if (raw.isBlank()) return
-
-        val outer = runCatching { JSONObject(raw) }.getOrNull() ?: return
-        val info = outer.optJSONObject(config.instanceName) ?: firstJsonObject(outer)
-        if (info == null) {
-            state = RuntimeState(statusText = "实例已退出", logs = state.logs + "网络实例已退出")
+        if (raw.isBlank()) {
+            convergeMissingInstance("状态读取为空，网络实例可能已退出")
             return
         }
+
+        val outer = runCatching { JSONObject(raw) }.getOrNull()
+        if (outer == null) {
+            convergeMissingInstance("状态 JSON 解析失败，网络实例可能已退出")
+            return
+        }
+        val info = outer.optJSONObject(config.instanceName) ?: firstJsonObject(outer)
+        if (info == null) {
+            convergeMissingInstance("未找到运行实例，网络实例已退出")
+            return
+        }
+        missedPolls = 0
         val localCidr = extractLocalCidr(info)
         val proxyCidrs = collectPeerProxyCidrs(info)
         val nodes = parseNodes(info)
@@ -163,6 +217,20 @@ class EasyTierController(
                 requestVpn(vpnJson)
             }
         }
+    }
+
+    private suspend fun convergeMissingInstance(message: String) {
+        missedPolls += 1
+        if (missedPolls < 2) return
+        val job = pollJob
+        runningConfig = null
+        vpnSignature = ""
+        missedPolls = 0
+        directPublicIps = emptySet()
+        withContext(Dispatchers.IO) { NativeEasyTier.stopAllInstances() }
+        state = RuntimeState(statusText = "实例已退出", logs = (state.logs + message).takeLast(240))
+        pollJob = null
+        job?.cancel()
     }
 
     private fun firstJsonObject(obj: JSONObject): JSONObject? {

@@ -32,8 +32,24 @@ C:\Users\12345a\Desktop\moontier-android\app\build\outputs\apk\release\app-relea
 - 旧 Qt 版包名 `cn.qtet.qteasytier`，新原生版包名 `cn.moonflow.easytier`，可以共存。
 - 新版当前版本号为 `1.0.0` / `versionCode 1`。
 - 新版 release 已多次成功编译并安装。
-- 当前目录不是 git 仓库。
+- 当前目录已初始化为 Git 仓库，基线提交为 `204e7f5 Initial MoonTier Android baseline`。
 - 最近一次 `assembleRelease` 在修复弹窗/导航样式后成功过。
+
+## 本轮已完成修复
+
+- 已修复 JNI `collectNetworkInfos()` count 越界读取 / 非法释放风险。
+- 已为 JNI bridge 全部 FFI 调用增加同一把 mutex 串行化保护。
+- VPN 授权被拒绝时会回滚 native 实例、清空 VPN 签名并更新运行态。
+- 当前实现已显式声明不支持 Always-on VPN 自动恢复。
+- 运行态轮询连续读不到实例时会收敛为“实例已退出”，Activity 重建时会尝试附着已有 native 实例。
+- 启动配置不再隐式改写默认配置。
+- `instanceName` 在配置 normalize 阶段会自动去重。
+- 配置、设置和服务器列表写入已改用 `AtomicFile`。
+- 用户收藏服务器新增空白项不再立刻持久化，避免被存储层过滤后消失。
+- 明文 `http://` 服务器列表源已禁用，manifest 已关闭 cleartext traffic。
+- TOML 导出已补写 `network_label`。
+- `app/build.gradle` 已清理 Gradle 9 空格赋值弃用写法。
+- 本轮 release 构建成功；ADB 当前未检测到设备，尚未执行安装和手机侧验证。
 
 ## 已完成的重要改动
 
@@ -66,7 +82,7 @@ C:\Users\12345a\Desktop\moontier-android\AUDIT_FINDINGS.md
 
 ## 需要优先修复的问题
 
-### P0: JNI `collectNetworkInfos()` 越界与 FFI 串行化
+### 已完成: JNI `collectNetworkInfos()` 越界与 FFI 串行化
 
 文件:
 
@@ -99,7 +115,7 @@ const int boundedCount = std::min(count, maxLength);
 - 上一轮我尝试打这个补丁时因为工具 cwd 仍在旧 Qt 目录，补丁没有落下。
 - 需要在 `C:\Users\12345a\Desktop\moontier-android` 下改。
 
-### P0: VPN 授权拒绝后回滚
+### 已完成: VPN 授权拒绝后回滚
 
 文件:
 
@@ -131,7 +147,7 @@ fun onVpnPermissionDenied()
 
 - `MainActivity` 的 `vpnPermissionLauncher` 在非 OK 时调用该方法。
 
-### P0/P1: Always-on VPN
+### 已完成: Always-on VPN 短期处理
 
 文件:
 
@@ -151,7 +167,7 @@ app/src/main/java/cn/moonflow/easytier/EasyTierVpnService.kt
 
 - 持久化最后运行配置和 VPN JSON，Service 被系统拉起时能恢复。但这轮建议先显式禁用。
 
-### P1: 运行态与真实后台状态漂移
+### 已完成: 运行态与真实后台状态漂移
 
 文件:
 
@@ -166,7 +182,7 @@ app/src/main/java/cn/moonflow/easytier/EasyTierVpnService.kt
 - Service `onRevoke()` / `onDestroy()` 停掉 native 后，Activity UI 需要通过轮询收敛。
 - `release()` 只取消轮询可以保留，但下次 Activity 创建时应尝试重新附着已有 native 状态。
 
-### P1: 启动配置不应暗改默认配置
+### 已完成: 启动配置不应暗改默认配置
 
 文件:
 
@@ -192,7 +208,7 @@ store.setDefaultConfig(normalized.id)
 - 不要调用 `setDefaultConfig()`。
 - 如需保存运行前的配置，只保存原配置内容，不改变默认标志。
 
-### P1: `instanceName` 唯一性
+### 已完成: `instanceName` 唯一性
 
 文件:
 
@@ -208,7 +224,7 @@ app/src/main/java/cn/moonflow/easytier/Models.kt
 - 重名时追加 `-1`、`-2` 等。
 - 保存配置和导入 TOML 都走 `saveConfigs()/normalizeConfigs()`。
 
-### P1: 用户服务器编辑页数据丢失
+### 已完成: 用户服务器编辑页数据丢失
 
 文件:
 
@@ -230,7 +246,7 @@ app/src/main/java/cn/moonflow/easytier/ConfigStore.kt
 - 地址非空时或离开页面/点击保存时再写盘。
 - 或者在服务器页增加明确“保存收藏”按钮。
 
-### P1/P2: 原子写入
+### 已完成: 原子写入
 
 文件:
 
@@ -257,7 +273,7 @@ private fun writeTextAtomic(file: File, text: String)
 - 不要立即覆盖目标文件。
 - 可返回内存默认值，但保存时要谨慎，避免坏文件被静默清空。
 
-### P2: 明文 HTTP 源
+### 已完成: 明文 HTTP 源
 
 文件:
 
@@ -274,7 +290,7 @@ app/src/main/java/cn/moonflow/easytier/ConfigStore.kt
   - 普通域名 TXT
 - Manifest 可把 `usesCleartextTraffic` 改为 `false`。
 
-### P2: TOML 往返丢配置标签
+### 已完成: TOML 往返丢配置标签
 
 文件:
 
@@ -292,7 +308,7 @@ network_label = "..."
 
 - 导入时已经优先读 `network_label`，补导出即可。
 
-### P2: Gradle DSL 弃用
+### 已完成: Gradle DSL 弃用
 
 文件:
 
@@ -381,9 +397,8 @@ C:\Android\Sdk\platform-tools\adb.exe
 
 ## 注意事项
 
-- 当前项目不是 git 仓库。可以先 `git init` 再做大改，或者至少复制文件备份。
+- 当前项目已是 Git 仓库，可通过提交回滚本轮改动。
 - 旧 Qt 项目仍在 `qtet-android-master`，不要把新原生代码再搬回旧目录。
 - `native-android` 旧副本已从 Qt 项目中删除。
 - 用户更看重实际手机体验，修完后要 release 编译安装，不要只停在构建成功。
 - 用户明确要求 release 包，因为 debug 包签名/安装不可靠。
-
