@@ -55,7 +55,7 @@ class ConfigStore(private val context: Context) {
     @Synchronized
     fun deleteConfig(id: String) {
         val current = loadConfigs().filterNot { it.id == id }
-        saveConfigs(if (current.isEmpty()) listOf(NetworkConfig.defaultConfig()) else current)
+        saveConfigs(current)
     }
 
     @Synchronized
@@ -261,12 +261,23 @@ class ConfigStore(private val context: Context) {
 
     private fun httpGet(target: String, accept: String): String {
         val connection = URL(target).openConnection() as HttpURLConnection
-        connection.connectTimeout = 6000
-        connection.readTimeout = 8000
-        connection.requestMethod = "GET"
-        connection.setRequestProperty("Accept", accept)
-        connection.instanceFollowRedirects = true
-        return connection.inputStream.bufferedReader().use { it.readText() }
+        try {
+            connection.connectTimeout = 6000
+            connection.readTimeout = 8000
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Accept", accept)
+            connection.instanceFollowRedirects = true
+            val responseCode = connection.responseCode
+            if (responseCode in 200..299) {
+                return connection.inputStream.bufferedReader().use { it.readText() }
+            }
+            val errorBody = runCatching {
+                connection.errorStream?.bufferedReader()?.use { it.readText() }
+            }.getOrNull().orEmpty()
+            throw IllegalStateException("HTTP $responseCode: $errorBody".trimIndent())
+        } finally {
+            connection.disconnect()
+        }
     }
 
     fun resolvePublicIpv4(host: String): List<String> = runCatching {

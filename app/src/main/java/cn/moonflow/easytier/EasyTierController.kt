@@ -37,40 +37,43 @@ class EasyTierController(
         if (state.starting || state.stopping) return
         state = state.copy(starting = true, statusText = "正在启动 ${config.displayName}")
         scope.launch {
-            if (state.running) stop(wait = true)
+            runCatching {
+                if (state.running) stop(wait = true)
 
-            val normalized = config
-            val runtimeConfig = normalized.withRuntimeHostname(context)
-            store.saveConfig(normalized)
-            runningConfig = runtimeConfig
-            directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(runtimeConfig, store) }
-            vpnSignature = ""
-            lastLogKey = ""
-            missedPolls = 0
-            state = RuntimeState(starting = true, statusText = "正在启动 ${normalized.displayName}")
+                val normalized = config
+                val runtimeConfig = normalized.withRuntimeHostname(context)
+                store.saveConfig(normalized)
+                runningConfig = runtimeConfig
+                directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(runtimeConfig, store) }
+                vpnSignature = ""
+                lastLogKey = ""
+                missedPolls = 0
 
-            val toml = TomlCodec.build(runtimeConfig)
-            val parseCode = withContext(Dispatchers.IO) { NativeEasyTier.parseConfig(toml) }
-            if (parseCode != 0) {
-                failStart("配置解析失败: ${NativeEasyTier.getLastError().orEmpty()}")
-                return@launch
+                val toml = TomlCodec.build(runtimeConfig)
+                val parseCode = withContext(Dispatchers.IO) { NativeEasyTier.parseConfig(toml) }
+                if (parseCode != 0) {
+                    failStart("配置解析失败: ${NativeEasyTier.getLastError().orEmpty()}")
+                    return@launch
+                }
+
+                val code = withContext(Dispatchers.IO) { NativeEasyTier.runNetworkInstance(toml) }
+                if (code != 0) {
+                    failStart("启动失败: ${NativeEasyTier.getLastError().orEmpty()}")
+                    return@launch
+                }
+
+                state = state.copy(
+                    running = true,
+                    starting = false,
+                    runningConfigId = runtimeConfig.id,
+                    statusText = "实例运行中: ${normalized.displayName}",
+                    logs = listOf("EasyTier 日志级别: info", "网络实例启动成功")
+                )
+                pollJob?.cancel()
+                pollJob = scope.launch { pollLoop(runtimeConfig) }
+            }.onFailure {
+                failStart("启动异常: ${it.message ?: it.javaClass.simpleName}")
             }
-
-            val code = withContext(Dispatchers.IO) { NativeEasyTier.runNetworkInstance(toml) }
-            if (code != 0) {
-                failStart("启动失败: ${NativeEasyTier.getLastError().orEmpty()}")
-                return@launch
-            }
-
-            state = state.copy(
-                running = true,
-                starting = false,
-                runningConfigId = runtimeConfig.id,
-                statusText = "实例运行中: ${normalized.displayName}",
-                logs = listOf("EasyTier 日志级别: info", "网络实例启动成功")
-            )
-            pollJob?.cancel()
-            pollJob = scope.launch { pollLoop(runtimeConfig) }
         }
     }
 
@@ -132,12 +135,19 @@ class EasyTierController(
         vpnSignature = ""
         missedPolls = 0
         directPublicIps = emptySet()
-        state = RuntimeState(statusText = statusText, logs = (state.logs + logMessage).takeLast(240))
+        appendLog(logMessage)
+        state = state.copy(statusText = statusText)
         if (wait) delay(180)
     }
 
     fun release() {
         pollJob?.cancel()
+        pollJob = null
+        runCatching { NativeEasyTier.stopAllInstances() }
+        runningConfig = null
+        vpnSignature = ""
+        missedPolls = 0
+        directPublicIps = emptySet()
     }
 
     private fun failStart(message: String) {
@@ -148,6 +158,10 @@ class EasyTierController(
         missedPolls = 0
         state = RuntimeState(statusText = "启动失败", logs = listOf(message))
     }
+    private fun appendLog(message: String) {
+        state = state.copy(logs = (state.logs + message).takeLast(240))
+    }
+
 
     private suspend fun pollLoop(config: NetworkConfig) {
         while (true) {
@@ -214,9 +228,7 @@ class EasyTierController(
                     configuredExitNodes.isNotEmpty() -> "出口节点已配置，自动路由未开启"
                     else -> "未配置出口节点"
                 }
-                state = state.copy(
-                    logs = (state.logs + "VPN 路由下发: $routeCount 条，$exitRouteState").takeLast(240)
-                )
+                appendLog("VPN ????: $routeCount ??$exitRouteState")
                 requestVpn(vpnJson)
             }
         }
@@ -231,7 +243,8 @@ class EasyTierController(
         missedPolls = 0
         directPublicIps = emptySet()
         withContext(Dispatchers.IO) { NativeEasyTier.stopAllInstances() }
-        state = RuntimeState(statusText = "实例已退出", logs = (state.logs + message).takeLast(240))
+        appendLog(message)
+        state = state.copy(statusText = "实例已退出")
         pollJob = null
         job?.cancel()
     }
