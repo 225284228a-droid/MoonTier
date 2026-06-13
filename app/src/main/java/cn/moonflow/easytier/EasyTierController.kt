@@ -2,6 +2,8 @@ package cn.moonflow.easytier
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -38,15 +40,16 @@ class EasyTierController(
             if (state.running) stop(wait = true)
 
             val normalized = config
+            val runtimeConfig = normalized.withRuntimeHostname(context)
             store.saveConfig(normalized)
-            runningConfig = normalized
-            directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(normalized, store) }
+            runningConfig = runtimeConfig
+            directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(runtimeConfig, store) }
             vpnSignature = ""
             lastLogKey = ""
             missedPolls = 0
             state = RuntimeState(starting = true, statusText = "正在启动 ${normalized.displayName}")
 
-            val toml = TomlCodec.build(normalized)
+            val toml = TomlCodec.build(runtimeConfig)
             val parseCode = withContext(Dispatchers.IO) { NativeEasyTier.parseConfig(toml) }
             if (parseCode != 0) {
                 failStart("配置解析失败: ${NativeEasyTier.getLastError().orEmpty()}")
@@ -62,12 +65,12 @@ class EasyTierController(
             state = state.copy(
                 running = true,
                 starting = false,
-                runningConfigId = normalized.id,
+                runningConfigId = runtimeConfig.id,
                 statusText = "实例运行中: ${normalized.displayName}",
                 logs = listOf("EasyTier 日志级别: info", "网络实例启动成功")
             )
             pollJob?.cancel()
-            pollJob = scope.launch { pollLoop(normalized) }
+            pollJob = scope.launch { pollLoop(runtimeConfig) }
         }
     }
 
@@ -80,7 +83,7 @@ class EasyTierController(
         scope.launch {
             val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(32).orEmpty() }
             val outer = runCatching { JSONObject(raw) }.getOrNull() ?: return@launch
-            val config = configs.firstOrNull { outer.has(it.instanceName) } ?: configs.firstOrNull() ?: return@launch
+            val config = configs.firstOrNull { outer.optJSONObject(it.instanceName) != null } ?: return@launch
             runningConfig = config
             directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(config, store) }
             vpnSignature = ""
@@ -331,5 +334,23 @@ class EasyTierController(
             .filter { lastLogKey.isBlank() || it.first > lastLogKey }
         if (fresh.isNotEmpty()) lastLogKey = fresh.last().first
         return fresh.map { it.second }
+    }
+
+    private fun NetworkConfig.withRuntimeHostname(context: Context): NetworkConfig {
+        if (hostname.isNotBlank() && !hostname.equals("localhost", ignoreCase = true)) return this
+        return copy(hostname = defaultRuntimeHostname(context, id))
+    }
+
+    private fun defaultRuntimeHostname(context: Context, id: String): String {
+        val candidates = listOf(
+            runCatching { Settings.Global.getString(context.contentResolver, "device_name") }.getOrNull(),
+            runCatching { Settings.Secure.getString(context.contentResolver, "bluetooth_name") }.getOrNull(),
+            Build.MODEL,
+            Build.DEVICE
+        )
+        return candidates
+            .map { it.orEmpty().trim() }
+            .firstOrNull { it.isNotBlank() && !it.equals("localhost", ignoreCase = true) }
+            ?: "Android-${id.take(8)}"
     }
 }

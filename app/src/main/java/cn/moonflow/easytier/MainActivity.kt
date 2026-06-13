@@ -62,7 +62,6 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
@@ -512,79 +511,84 @@ private fun NetworkPage(
         configs.firstOrNull { it.isDefault }
     } ?: NetworkConfig.defaultConfig()
 
-    Column(
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(top = 14.dp, bottom = 104.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Header(
-            title = if (runtime.running) "当前网络" else "默认配置",
-            subtitle = current.displayName,
-            palette = palette
-        )
-        AnimatedContent(
-            targetState = runtime.running,
-            transitionSpec = {
-                (fadeIn(tween(180)) + slideInHorizontally(tween(180)) { it / 18 })
-                    .togetherWith(fadeOut(tween(140)) + slideOutHorizontally(tween(140)) { -it / 18 })
-            },
-            label = "network-mode"
-        ) { running ->
-            if (!running) {
-                QCard(palette) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        StatusDot(palette.subText)
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(current.displayName, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                            Text(current.networkName.ifBlank { "尚未填写网络名称" }, color = palette.subText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        item {
+            Header(
+                title = if (runtime.running) "当前网络" else "默认配置",
+                subtitle = current.displayName,
+                palette = palette
+            )
+        }
+        item {
+            AnimatedContent(
+                targetState = runtime.running,
+                transitionSpec = {
+                    (fadeIn(tween(180)) + slideInHorizontally(tween(180)) { it / 18 })
+                        .togetherWith(fadeOut(tween(140)) + slideOutHorizontally(tween(140)) { -it / 18 })
+                },
+                label = "network-mode"
+            ) { running ->
+                if (!running) {
+                    QCard(palette) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            StatusDot(palette.subText)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(current.displayName, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                                Text(current.networkName.ifBlank { "尚未填写网络名称" }, color = palette.subText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            QButton(
+                                text = if (runtime.starting) "启动中..." else "启动",
+                                palette = palette,
+                                modifier = Modifier.weight(1f),
+                                enabled = !runtime.starting,
+                                icon = Icons.Rounded.PlayArrow,
+                                onClick = { onStart(current) }
+                            )
+                            QButton(
+                                text = "编辑",
+                                palette = palette,
+                                modifier = Modifier.weight(1f),
+                                primary = false,
+                                icon = Icons.Rounded.Edit,
+                                onClick = { onEdit(current) }
+                            )
                         }
                     }
-                    Spacer(Modifier.height(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        QButton(
-                            text = if (runtime.starting) "启动中..." else "启动",
-                            palette = palette,
-                            modifier = Modifier.weight(1f),
-                            enabled = !runtime.starting,
-                            icon = Icons.Rounded.PlayArrow,
-                            onClick = { onStart(current) }
-                        )
-                        QButton(
-                            text = "编辑",
-                            palette = palette,
-                            modifier = Modifier.weight(1f),
-                            primary = false,
-                            icon = Icons.Rounded.Edit,
-                            onClick = { onEdit(current) }
-                        )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            QButton(
+                                text = "编辑配置",
+                                palette = palette,
+                                modifier = Modifier.weight(1f),
+                                primary = false,
+                                icon = Icons.Rounded.Edit,
+                                enabled = !runtime.stopping,
+                                onClick = { onEdit(current) }
+                            )
+                            QButton(
+                                text = if (runtime.stopping) "停止中..." else "停止",
+                                palette = palette,
+                                modifier = Modifier.weight(1f),
+                                danger = true,
+                                icon = Icons.Rounded.Stop,
+                                enabled = !runtime.stopping,
+                                onClick = onStop
+                            )
+                        }
+                        RunningStatus(palette, runtime, current.displayName)
                     }
-                }
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        QButton(
-                            text = "编辑配置",
-                            palette = palette,
-                            modifier = Modifier.weight(1f),
-                            primary = false,
-                            icon = Icons.Rounded.Edit,
-                            enabled = !runtime.stopping,
-                            onClick = { onEdit(current) }
-                        )
-                        QButton(
-                            text = if (runtime.stopping) "停止中..." else "停止",
-                            palette = palette,
-                            modifier = Modifier.weight(1f),
-                            danger = true,
-                            icon = Icons.Rounded.Stop,
-                            enabled = !runtime.stopping,
-                            onClick = onStop
-                        )
-                    }
-                    RunningStatus(palette, runtime, current.displayName)
                 }
             }
         }
@@ -594,29 +598,48 @@ private fun NetworkPage(
 @Composable
 private fun RunningStatus(palette: Palette, runtime: RuntimeState, label: String) {
     var logsExpanded by remember { mutableStateOf(false) }
+    var nodesExpanded by remember(runtime.runningConfigId, runtime.localCidr) { mutableStateOf(false) }
     QCard(palette, modifier = Modifier.fillMaxWidth()) {
         Text(label, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Text(runtime.statusText, color = palette.subText, fontSize = 13.sp, modifier = Modifier.padding(top = 3.dp))
         Spacer(Modifier.height(14.dp))
-        Text("设备列表", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(8.dp))
-        if (runtime.nodes.isEmpty()) {
-            Text("等待节点信息", color = palette.subText, fontSize = 13.sp)
-        } else {
-            runtime.nodes.forEach { node ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    StatusDot(if (node.local) palette.accent else palette.success)
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(node.hostname, color = palette.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${node.ip} · ${node.role}", color = palette.subText, fontSize = 12.sp, maxLines = 1)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("设备列表", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (runtime.nodes.isEmpty()) "等待节点信息" else "${runtime.nodes.size} 个设备",
+                    color = palette.subText,
+                    fontSize = 12.sp
+                )
+            }
+            ExpandArrow(nodesExpanded, palette) { nodesExpanded = !nodesExpanded }
+        }
+        AnimatedVisibility(visible = nodesExpanded, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
+            Column {
+                if (runtime.nodes.isEmpty()) {
+                    Text("等待节点信息", color = palette.subText, fontSize = 13.sp, modifier = Modifier.padding(vertical = 6.dp))
+                } else {
+                    runtime.nodes.forEach { node ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            StatusDot(if (node.local) palette.accent else palette.success)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(node.hostname, color = palette.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${node.ip} · ${node.role}", color = palette.subText, fontSize = 12.sp, maxLines = 1)
+                            }
+                            if (node.latencyMs >= 0) Text("${node.latencyMs} ms", color = palette.subText, fontSize = 12.sp)
+                        }
                     }
-                    if (node.latencyMs >= 0) Text("${node.latencyMs} ms", color = palette.subText, fontSize = 12.sp)
                 }
             }
         }
@@ -624,13 +647,11 @@ private fun RunningStatus(palette: Palette, runtime: RuntimeState, label: String
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
-                .clickable { logsExpanded = !logsExpanded }
                 .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("运行日志", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            Icon(if (logsExpanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown, null, tint = palette.text)
+            ExpandArrow(logsExpanded, palette) { logsExpanded = !logsExpanded }
         }
         AnimatedVisibility(visible = logsExpanded, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
             Column(
@@ -726,11 +747,6 @@ private fun ServersPage(
     var editable by remember(userServers) { mutableStateOf(userServers) }
     var officialOpen by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf("") }
-    val officialArrowRotation by animateFloatAsState(
-        targetValue = if (officialOpen) 180f else 0f,
-        animationSpec = tween(180),
-        label = "official-arrow"
-    )
 
     LazyColumn(
         modifier = Modifier
@@ -801,23 +817,7 @@ private fun ServersPage(
                         Text("官方服务器列表", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                         Text("${officialServers.size} 个服务器", color = palette.subText, fontSize = 12.sp)
                     }
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .border(BorderStroke(1.2.dp, palette.text.copy(alpha = 0.82f)), CircleShape)
-                            .clickable { officialOpen = !officialOpen },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Rounded.KeyboardArrowDown,
-                            null,
-                            tint = palette.text,
-                            modifier = Modifier
-                                .size(18.dp)
-                                .graphicsLayer { rotationZ = officialArrowRotation }
-                        )
-                    }
+                    ExpandArrow(officialOpen, palette) { officialOpen = !officialOpen }
                 }
                 AnimatedVisibility(
                     visible = officialOpen,
@@ -977,8 +977,8 @@ private fun ConfigEditorScreenV2(
         item {
             QCard(palette) {
                 SmallLabel("基础设置", palette)
-                FieldBlock("用户名", palette) {
-                    QTextField(cfg.hostname, "请输入用户名（可留空）", palette) { cfg = cfg.copy(hostname = it) }
+                FieldBlock("主机名", palette) {
+                    QTextField(cfg.hostname, "留空时使用系统设备名", palette) { cfg = cfg.copy(hostname = it) }
                 }
                 FieldBlock("网络名称", palette) {
                     QTextField(cfg.networkName, "请输入网络名称", palette) { cfg = cfg.copy(networkName = it) }
@@ -1270,11 +1270,6 @@ private fun ExpandableQCard(
     palette: Palette,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val arrowRotation by animateFloatAsState(
-        targetValue = if (expanded) 180f else 0f,
-        animationSpec = tween(180),
-        label = "expand-arrow"
-    )
     QCard(palette) {
         Row(
             modifier = Modifier
@@ -1283,23 +1278,7 @@ private fun ExpandableQCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(title, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .clip(CircleShape)
-                    .border(BorderStroke(1.2.dp, palette.text.copy(alpha = 0.82f)), CircleShape)
-                    .clickable { onExpandedChange(!expanded) },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    Icons.Rounded.KeyboardArrowDown,
-                    null,
-                    tint = palette.text,
-                    modifier = Modifier
-                        .size(18.dp)
-                        .graphicsLayer { rotationZ = arrowRotation }
-                )
-            }
+            ExpandArrow(expanded, palette) { onExpandedChange(!expanded) }
         }
         AnimatedVisibility(
             visible = expanded,
@@ -1314,6 +1293,38 @@ private fun ExpandableQCard(
                 content = content
             )
         }
+    }
+}
+
+@Composable
+private fun ExpandArrow(
+    expanded: Boolean,
+    palette: Palette,
+    onClick: () -> Unit
+) {
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(180),
+        label = "expand-arrow"
+    )
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Rounded.KeyboardArrowDown,
+            null,
+            tint = palette.text,
+            modifier = Modifier
+                .size(22.dp)
+                .graphicsLayer { rotationZ = arrowRotation }
+        )
     }
 }
 
