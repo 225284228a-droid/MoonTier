@@ -707,6 +707,7 @@ private fun ProfilesPage(
     onDefault: (NetworkConfig) -> Unit,
     onExport: (NetworkConfig) -> Unit
 ) {
+    var pendingDeleteConfig by remember { mutableStateOf<NetworkConfig?>(null) }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -749,12 +750,30 @@ private fun ProfilesPage(
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     QButton("导出", palette, Modifier.weight(1f), primary = false, onClick = { onExport(cfg) })
-                    QButton("删除", palette, Modifier.weight(1f), primary = false, dangerText = true, icon = Icons.Rounded.Delete, enabled = !runningHere, onClick = { onDelete(cfg) })
+                    QButton("删除", palette, Modifier.weight(1f), primary = false, dangerText = true, icon = Icons.Rounded.Delete, enabled = !runningHere, onClick = { pendingDeleteConfig = cfg })
                 }
             }
         }
     }
-}
+
+            pendingDeleteConfig?.let { cfg ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteConfig = null },
+            title = { Text("确认删除", color = palette.text, fontWeight = FontWeight.SemiBold) },
+            text = { Text("确定要删除配置「${cfg.displayName}」吗？此操作不可撤销。", color = palette.subText, lineHeight = 20.sp) },
+            confirmButton = {
+                QButton("删除", palette, compact = true, danger = true) {
+                    onDelete(cfg)
+                    pendingDeleteConfig = null
+                }
+            },
+            dismissButton = {
+                QButton("取消", palette, primary = false, compact = true) { pendingDeleteConfig = null }
+            },
+            containerColor = palette.surface,
+            shape = RoundedCornerShape(22.dp)
+        )
+    }}
 
 @Composable
 private fun ServersPage(
@@ -769,6 +788,7 @@ private fun ServersPage(
     var editable by remember(userServers) { mutableStateOf(userServers) }
     var officialOpen by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf("") }
+    var pendingDeleteIndex by remember { mutableIntStateOf(-1) }
 
     LazyColumn(
         modifier = Modifier
@@ -820,11 +840,7 @@ private fun ServersPage(
                                     if (it.isNotBlank()) onSaveUserServers(next)
                                 }
                             )
-                            IconButton(onClick = {
-                                val next = editable.filterIndexed { i, _ -> i != index }
-                                editable = next
-                                onSaveUserServers(next)
-                            }) {
+                            IconButton(onClick = { pendingDeleteIndex = index }) {
                                 Icon(Icons.Rounded.Delete, null, tint = palette.error)
                             }
                         }
@@ -895,7 +911,28 @@ private fun ServersPage(
             }
         }
     }
-}
+
+        if (pendingDeleteIndex >= 0 && pendingDeleteIndex < editable.size) {
+        val server = editable[pendingDeleteIndex]
+        AlertDialog(
+            onDismissRequest = { pendingDeleteIndex = -1 },
+            title = { Text("确认删除", color = palette.text, fontWeight = FontWeight.SemiBold) },
+            text = { Text("确定要删除收藏服务器「${server.name.ifBlank { server.address }}」吗？", color = palette.subText, lineHeight = 20.sp) },
+            confirmButton = {
+                QButton("删除", palette, compact = true, danger = true) {
+                    val next = editable.filterIndexed { i, _ -> i != pendingDeleteIndex }
+                    editable = next
+                    onSaveUserServers(next)
+                    pendingDeleteIndex = -1
+                }
+            },
+            dismissButton = {
+                QButton("取消", palette, primary = false, compact = true) { pendingDeleteIndex = -1 }
+            },
+            containerColor = palette.surface,
+            shape = RoundedCornerShape(22.dp)
+        )
+    }}
 
 @Composable
 private fun SettingsPage(
