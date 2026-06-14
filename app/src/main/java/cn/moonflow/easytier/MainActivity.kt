@@ -822,6 +822,16 @@ private fun ServersPage(
         editable = syncEditableServerItems(editable, userServers) { nextEditableServerId++ }
     }
 
+    fun persist(next: List<EditableServerItem>) {
+        onSaveUserServers(next.toServerEntries())
+    }
+
+    fun updateServer(itemId: Long, transform: (ServerEntry) -> ServerEntry): ServerEntry {
+        val updated = transform(editable.first { it.id == itemId }.server)
+        editable = editable.replaceServerItem(itemId, updated)
+        return updated
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -878,13 +888,9 @@ private fun ServersPage(
                                         value = server.name,
                                         placeholder = "名称",
                                         palette = palette,
-                                        onValueChange = {
-                                            val next = editable.replaceServerItem(item.id, server.copy(name = it))
-                                            editable = next
-                                            next.firstOrNull { entry -> entry.id == item.id }
-                                                ?.server
-                                                ?.takeIf { updated -> updated.address.isNotBlank() }
-                                                ?.let { onSaveUserServers(next.map { entry -> entry.server }) }
+                                        onValueChange = { name ->
+                                            val updated = updateServer(item.id) { it.copy(name = name) }
+                                            if (updated.address.isNotBlank()) persist(editable)
                                         }
                                     )
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -893,10 +899,9 @@ private fun ServersPage(
                                             placeholder = "tcp://server.example.com:11010",
                                             palette = palette,
                                             modifier = Modifier.weight(1f),
-                                            onValueChange = {
-                                                val next = editable.replaceServerItem(item.id, server.copy(address = it))
-                                                editable = next
-                                                if (it.isNotBlank()) onSaveUserServers(next.map { entry -> entry.server })
+                                            onValueChange = { address ->
+                                                val updated = updateServer(item.id) { it.copy(address = address) }
+                                                if (updated.address.isNotBlank()) persist(editable)
                                             }
                                         )
                                         IconButton(onClick = { pendingDeleteId = item.id }) {
@@ -999,7 +1004,7 @@ private fun ServersPage(
             delay(300)
             val next = editable.filterNot { it.id == deletingId }
             editable = next
-            onSaveUserServers(next.map { it.server })
+            persist(next)
             deletingId = -1L
         }
     }
@@ -1897,6 +1902,9 @@ private fun syncEditableServerItems(
 
 private fun List<EditableServerItem>.replaceServerItem(id: Long, server: ServerEntry): List<EditableServerItem> =
     map { item -> if (item.id == id) item.copy(server = server) else item }
+
+private fun List<EditableServerItem>.toServerEntries(): List<ServerEntry> =
+    map { it.server }
 
 private fun <T> List<T>.replaceAt(index: Int, value: T): List<T> =
     mapIndexed { i, old -> if (i == index) value else old }
