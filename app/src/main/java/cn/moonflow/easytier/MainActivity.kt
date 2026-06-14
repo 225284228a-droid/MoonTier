@@ -1052,7 +1052,7 @@ private fun ConfigEditorScreenV2(
     var serverPicker by remember { mutableStateOf<ServerPickerState?>(null) }
 
     BackHandler {
-        onSave(cfg)
+        onBack()
     }
 
     LazyColumn(
