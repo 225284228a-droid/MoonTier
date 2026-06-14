@@ -155,7 +155,7 @@ class MainActivity : ComponentActivity() {
         runCatching {
             contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(pendingExportText) }
         }.onSuccess {
-            onFileMessage?.invoke("导出完成", "TOML 配置已写入文件")
+            onFileMessage?.invoke("导出完成", "TOML 配置已写入文�?)
         }.onFailure {
             onFileMessage?.invoke("导出失败", it.message ?: "无法写入文件")
         }
@@ -171,7 +171,7 @@ class MainActivity : ComponentActivity() {
         window.attributes = window.attributes.apply { preferredRefreshRate = 120f }
 
         setContent {
-            // 动态轮询：前台 30s，后台 2min
+            // 动态轮询：前台 30s，后�?2min
             LaunchedEffect(isForeground) {
                 controller.pollIntervalMs = if (isForeground) 30000 else 120000
             }
@@ -303,7 +303,7 @@ private fun MoonTierApp(
             { cfg ->
                 store.saveConfig(cfg.copy(id = java.util.UUID.randomUUID().toString(), isDefault = configs.isEmpty()))
                 reloadAll()
-                dialog = "导入完成" to "TOML 配置已加入配置文件列表"
+                dialog = "导入完成" to "TOML 配置已加入配置文件列�?
             },
             { title, body -> dialog = title to body }
         )
@@ -362,7 +362,7 @@ private fun MoonTierApp(
                         onEdit = { editingConfig = it },
                         onNewConfig = {
                             editingConfig = NetworkConfig.defaultConfig(default = configs.isEmpty()).copy(
-                                label = "新配置",
+                                label = "新配�?,
                                 instanceName = "MoonTier-${System.currentTimeMillis().toString().takeLast(6)}"
                             )
                         },
@@ -385,7 +385,7 @@ private fun MoonTierApp(
                             val named = server.copy(name = nextServerName(current, server.name.ifBlank { serverNameFromAddress(server.address) }))
                             store.saveUserServers((current + named).distinctBy { it.address.lowercase() })
                             reloadAll()
-                            dialog = "已添加" to server.address
+                            dialog = "已添�? to server.address
                         },
                         onSettings = {
                             settings = it
@@ -398,7 +398,7 @@ private fun MoonTierApp(
                                         reloadAll()
                                         dialog = "同步完成" to it.message
                                     }.onFailure {
-                                        dialog = "同步失败" to (it.message ?: "无法同步官方源")
+                                        dialog = "同步失败" to (it.message ?: "无法同步官方�?)
                                     }
                             }
                         },
@@ -409,7 +409,7 @@ private fun MoonTierApp(
                                         reloadAll()
                                         dialog = "下载完成" to it.message
                                     }.onFailure {
-                                        dialog = "下载失败" to (it.message ?: "无法下载服务器列表")
+                                        dialog = "下载失败" to (it.message ?: "无法下载服务器列�?)
                                     }
                             }
                         }
@@ -481,7 +481,7 @@ private fun MainTabs(
         listOf(
             NavItem("网络配置", Icons.Rounded.Wifi),
             NavItem("配置文件", Icons.Rounded.Description),
-            NavItem("服务器", Icons.Rounded.Storage),
+            NavItem("服务�?, Icons.Rounded.Storage),
             NavItem("设置", Icons.Rounded.Settings)
         )
     }
@@ -577,7 +577,7 @@ private fun NetworkPage(
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             QButton(
-                                text = if (runtime.starting) "启动中..." else "启动",
+                                text = if (runtime.starting) "启动�?.." else "启动",
                                 palette = palette,
                                 modifier = Modifier.weight(1f),
                                 enabled = !runtime.starting,
@@ -607,7 +607,7 @@ private fun NetworkPage(
                                 onClick = { onEdit(current) }
                             )
                             QButton(
-                                text = if (runtime.stopping) "停止中..." else "停止",
+                                text = if (runtime.stopping) "停止�?.." else "停止",
                                 palette = palette,
                                 modifier = Modifier.weight(1f),
                                 danger = true,
@@ -641,7 +641,7 @@ private fun RunningStatus(palette: Palette, runtime: RuntimeState, label: String
             Column(Modifier.weight(1f)) {
                 Text("设备列表", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    if (runtime.nodes.isEmpty()) "等待节点信息" else "${runtime.nodes.size} 个设备",
+                    if (runtime.nodes.isEmpty()) "等待节点信息" else "${runtime.nodes.size} 个设�?,
                     color = palette.subText,
                     fontSize = 12.sp
                 )
@@ -721,7 +721,7 @@ private fun ProfilesPage(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Header("配置文件", "同一时间只能运行一个 VPN 配置", palette)
+            Header("配置文件", "同一时间只能运行一�?VPN 配置", palette)
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -783,7 +783,7 @@ private fun ServersPage(
         contentPadding = PaddingValues(top = 14.dp, bottom = 26.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { Header("服务器", "用户收藏和官方源分开管理", palette) }
+        item { Header("服务�?, "用户收藏和官方源分开管理", palette) }
         item {
             QButton("新增收藏", palette, Modifier.fillMaxWidth(), icon = Icons.Rounded.Add) {
                 editable = editable + ServerEntry(nextServerName(editable), "")
@@ -794,7 +794,7 @@ private fun ServersPage(
                 Text("用户收藏", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(10.dp))
                 if (editable.isEmpty()) {
-                    Text("暂无收藏服务器", color = palette.subText, fontSize = 13.sp)
+                    Text("暂无收藏服务�?, color = palette.subText, fontSize = 13.sp)
                 }
                 editable.forEachIndexed { index, server ->
                     Column(Modifier.padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -841,7 +841,7 @@ private fun ServersPage(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("官方服务器列表", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                        Text("官方服务器列�?, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                         Text("${officialServers.size} 个服务器", color = palette.subText, fontSize = 12.sp)
                     }
                     ExpandArrow(officialOpen, palette) { officialOpen = !officialOpen }
@@ -853,14 +853,14 @@ private fun ServersPage(
                 ) {
                     Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         QButton(
-                            "立即同步公共服务器",
+                            "立即同步公共服务�?,
                             palette,
                             Modifier.fillMaxWidth(),
                             primary = false,
                             icon = Icons.Rounded.Storage,
                             onClick = onSyncOfficial
                         )
-                        officialServers.ifEmpty { listOf(ServerEntry("暂无官方服务器", "")) }.forEach { server ->
+                        officialServers.ifEmpty { listOf(ServerEntry("暂无官方服务�?, "")) }.forEach { server ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -885,11 +885,11 @@ private fun ServersPage(
         }
         item {
             QCard(palette) {
-                Text("TXT 下载到用户收藏", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("TXT 下载到用户收�?, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Spacer(Modifier.height(10.dp))
-                QTextField(source, "域名或 https:// 文本地址", palette, onValueChange = { source = it })
+                QTextField(source, "域名�?https:// 文本地址", palette, onValueChange = { source = it })
                 Spacer(Modifier.height(10.dp))
-                QButton("下载到用户收藏", palette, Modifier.fillMaxWidth(), primary = false) {
+                QButton("下载到用户收�?, palette, Modifier.fillMaxWidth(), primary = false) {
                     onDownloadUsers(source)
                 }
             }
@@ -922,7 +922,7 @@ private fun SettingsPage(
                 SwitchRow("深色模式", settings.darkMode, palette) {
                     onSettings(settings.copy(darkMode = it))
                 }
-                SwitchRow("出口节点自动配置路由表", settings.exitNodeAutoRoutes, palette) {
+                SwitchRow("出口节点自动配置路由�?, settings.exitNodeAutoRoutes, palette) {
                     if (it) disclaimer = true else onSettings(settings.copy(exitNodeAutoRoutes = false))
                 }
             }
@@ -933,7 +933,7 @@ private fun SettingsPage(
         AlertDialog(
             onDismissRequest = { disclaimer = false },
             confirmButton = {
-                QButton("同意并开启", palette, compact = true) {
+                QButton("同意并开�?, palette, compact = true) {
                     onSettings(settings.copy(exitNodeAutoRoutes = true))
                     disclaimer = false
                 }
@@ -944,7 +944,7 @@ private fun SettingsPage(
             title = { Text("免责声明", color = palette.text, fontWeight = FontWeight.SemiBold) },
             text = {
                 Text(
-                    "该功能会在配置了出口节点时自动把公网 IPv4 路由指向 EasyTier 虚拟网卡。禁止使用该功能违法翻越防火墙；使用该功能必须遵守所在国家或地区的法律法规。",
+                    "该功能会在配置了出口节点时自动把公网 IPv4 路由指向 EasyTier 虚拟网卡。禁止使用该功能违法翻越防火墙；使用该功能必须遵守所在国家或地区的法律法规�?,
                     color = palette.subText,
                     lineHeight = 20.sp
                 )
@@ -992,10 +992,10 @@ private fun ConfigEditorScreenV2(
                 Spacer(Modifier.height(12.dp))
                 SmallLabel("配置名称", palette)
                 QTextField(cfg.label, "配置名称", palette) { cfg = cfg.copy(label = it) }
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(16.dp))
                 ActionBar(palette) {
                     QButton("保存", palette, Modifier.weight(1f), compact = true, icon = Icons.Rounded.Check) { onSave(cfg) }
-                    QButton("不保存", palette, Modifier.weight(1f), primary = false, compact = true) { onBack() }
+                    QButton("不保�?, palette, Modifier.weight(1f), primary = false, compact = true) { onBack() }
                     QButton("导出", palette, Modifier.weight(1f), primary = false, compact = true) { onExport(cfg) }
                 }
             }
@@ -1004,17 +1004,17 @@ private fun ConfigEditorScreenV2(
         item {
             QCard(palette) {
                 SmallLabel("基础设置", palette)
-                FieldBlock("主机名", palette) {
+                FieldBlock("主机�?, palette) {
                     QTextField(cfg.hostname, "留空时使用系统设备名", palette) { cfg = cfg.copy(hostname = it) }
                 }
                 FieldBlock("网络名称", palette) {
-                    QTextField(cfg.networkName, "请输入网络名称", palette) { cfg = cfg.copy(networkName = it) }
+                    QTextField(cfg.networkName, "请输入网络名�?, palette) { cfg = cfg.copy(networkName = it) }
                 }
                 FieldBlock("密码", palette) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         QTextField(
                             cfg.networkSecret,
-                            "请输入密码",
+                            "请输入密�?,
                             palette,
                             modifier = Modifier.weight(1f),
                             password = !passwordVisible
@@ -1035,15 +1035,15 @@ private fun ConfigEditorScreenV2(
                         onValueChange = { if (!cfg.dhcp) cfg = cfg.copy(ipv4 = it) }
                     )
                 }
-                SwitchRow("低延迟优先", cfg.latencyFirst, palette) { cfg = cfg.copy(latencyFirst = it) }
+                SwitchRow("低延迟优�?, cfg.latencyFirst, palette) { cfg = cfg.copy(latencyFirst = it) }
                 SwitchRow("私有模式", cfg.enablePrivateMode, palette) { cfg = cfg.copy(enablePrivateMode = it) }
             }
         }
 
         item {
-            ExpandableQCard("服务器", serverOpen, { serverOpen = it }, palette) {
+            ExpandableQCard("服务�?, serverOpen, { serverOpen = it }, palette) {
                 ListEditor(
-                    title = "服务器列表",
+                    title = "服务器列�?,
                     values = cfg.peerUrls,
                     placeholder = "tcp://server.example.com:11010",
                     palette = palette
@@ -1056,11 +1056,11 @@ private fun ConfigEditorScreenV2(
                         .padding(top = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    QButton("从收藏", palette, Modifier.weight(1f), primary = false, enabled = userServers.any { it.address.isNotBlank() }) {
+                    QButton("从收�?, palette, Modifier.weight(1f), primary = false, enabled = userServers.any { it.address.isNotBlank() }) {
                         serverPicker = ServerPickerState("用户收藏", userServers)
                     }
-                    QButton("从官方", palette, Modifier.weight(1f), primary = false, enabled = officialServers.any { it.address.isNotBlank() }) {
-                        serverPicker = ServerPickerState("官方服务器", officialServers)
+                    QButton("从官�?, palette, Modifier.weight(1f), primary = false, enabled = officialServers.any { it.address.isNotBlank() }) {
+                        serverPicker = ServerPickerState("官方服务�?, officialServers)
                     }
                 }
             }
@@ -1088,27 +1088,27 @@ private fun ConfigEditorScreenV2(
 
         item {
             ExpandableQCard("P2P 连接", p2pOpen, { p2pOpen = it }, palette) {
-                SwitchRow("仅 P2P", cfg.p2pOnly, palette) { cfg = cfg.copy(p2pOnly = it) }
+                SwitchRow("�?P2P", cfg.p2pOnly, palette) { cfg = cfg.copy(p2pOnly = it) }
                 SwitchRow("禁用 P2P", cfg.disableP2p, palette) { cfg = cfg.copy(disableP2p = it) }
-                SwitchRow("需要 P2P", cfg.needP2p, palette) { cfg = cfg.copy(needP2p = it) }
+                SwitchRow("需�?P2P", cfg.needP2p, palette) { cfg = cfg.copy(needP2p = it) }
                 SwitchRow("按需 P2P", cfg.lazyP2p, palette) { cfg = cfg.copy(lazyP2p = it) }
                 SwitchRow("禁用 UDP 打洞", cfg.disableUdpHolePunching, palette) { cfg = cfg.copy(disableUdpHolePunching = it) }
                 SwitchRow("禁用 TCP 打洞", cfg.disableTcpHolePunching, palette) { cfg = cfg.copy(disableTcpHolePunching = it) }
                 SwitchRow("禁用 UPnP", cfg.disableUpnp, palette) { cfg = cfg.copy(disableUpnp = it) }
                 SwitchRow("禁用对称 NAT 打洞", cfg.disableSymHolePunching, palette) { cfg = cfg.copy(disableSymHolePunching = it) }
-                SwitchRow("转发 RPC 包", cfg.relayAllPeerRpc, palette) { cfg = cfg.copy(relayAllPeerRpc = it) }
-                SwitchRow("仅使用物理网卡", cfg.bindDevice, palette) { cfg = cfg.copy(bindDevice = it) }
+                SwitchRow("转发 RPC �?, cfg.relayAllPeerRpc, palette) { cfg = cfg.copy(relayAllPeerRpc = it) }
+                SwitchRow("仅使用物理网�?, cfg.bindDevice, palette) { cfg = cfg.copy(bindDevice = it) }
             }
         }
 
         item {
-            ExpandableQCard("性能与系统", perfOpen, { perfOpen = it }, palette) {
-                SwitchRow("启用多线程", cfg.multiThread, palette) { cfg = cfg.copy(multiThread = it) }
+            ExpandableQCard("性能与系�?, perfOpen, { perfOpen = it }, palette) {
+                SwitchRow("启用多线�?, cfg.multiThread, palette) { cfg = cfg.copy(multiThread = it) }
                 SwitchRow("使用用户态协议栈", cfg.useSmoltcp, palette) { cfg = cfg.copy(useSmoltcp = it) }
-                SwitchRow("无 TUN 模式", cfg.noTun, palette) { cfg = cfg.copy(noTun = it) }
+                SwitchRow("�?TUN 模式", cfg.noTun, palette) { cfg = cfg.copy(noTun = it) }
                 SwitchRow("禁用 IPv6", cfg.disableIpv6, palette) { cfg = cfg.copy(disableIpv6 = it) }
-                FieldBlock("MTU 值", palette) {
-                    QTextField(if (cfg.mtu > 0) cfg.mtu.toString() else "", "最大 1380，留空使用默认", palette) {
+                FieldBlock("MTU �?, palette) {
+                    QTextField(if (cfg.mtu > 0) cfg.mtu.toString() else "", "最�?1380，留空使用默�?, palette) {
                         val mtu = it.trim().toIntOrNull()?.coerceIn(0, 1380) ?: 0
                         cfg = cfg.copy(mtu = mtu)
                     }
@@ -1121,10 +1121,10 @@ private fun ConfigEditorScreenV2(
                 SwitchRow("启用出口节点", cfg.enableExitNode, palette) { cfg = cfg.copy(enableExitNode = it) }
                 SwitchRow("系统转发", cfg.proxyForwardBySystem, palette) { cfg = cfg.copy(proxyForwardBySystem = it) }
                 SwitchRow("启用魔法 DNS", cfg.enableMagicDns, palette) { cfg = cfg.copy(enableMagicDns = it) }
-                SwitchRow("启用网络白名单", cfg.enableRelayNetworkWhitelist, palette) { cfg = cfg.copy(enableRelayNetworkWhitelist = it) }
+                SwitchRow("启用网络白名�?, cfg.enableRelayNetworkWhitelist, palette) { cfg = cfg.copy(enableRelayNetworkWhitelist = it) }
                 AnimatedVisibility(cfg.enableRelayNetworkWhitelist, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
                     Column(Modifier.padding(top = 8.dp)) {
-                        ListEditor("网络白名单", cfg.relayNetworkWhitelist, "网络名称", palette) {
+                        ListEditor("网络白名�?, cfg.relayNetworkWhitelist, "网络名称", palette) {
                             cfg = cfg.copy(relayNetworkWhitelist = it)
                         }
                     }
@@ -1135,8 +1135,8 @@ private fun ConfigEditorScreenV2(
                 ListEditor("子网代理 CIDR", cfg.proxyCidrs, "192.168.1.0/24", palette) {
                     cfg = cfg.copy(proxyCidrs = it)
                 }
-                Text("自定义进入 VPN 的路由，将禁用子网代理等自动传播的路由", color = palette.subText, fontSize = 12.sp)
-                ListEditor("自定义路由规则", cfg.routes, "10.0.0.0/8", palette) {
+                Text("自定义进�?VPN 的路由，将禁用子网代理等自动传播的路�?, color = palette.subText, fontSize = 12.sp)
+                ListEditor("自定义路由规�?, cfg.routes, "10.0.0.0/8", palette) {
                     cfg = cfg.copy(routes = it, enableManualRoutes = it.isNotEmpty())
                 }
                 ListEditor("出口节点列表", cfg.exitNodes, "10.126.126.1", palette) {
@@ -1584,7 +1584,7 @@ private fun ServerPickerDialog(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     if (alreadyAdded) {
-                                        Text("已在当前配置中", color = palette.subText, fontSize = 11.sp)
+                                        Text("已在当前配置�?, color = palette.subText, fontSize = 11.sp)
                                     }
                                 }
                             }
