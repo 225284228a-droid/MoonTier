@@ -178,15 +178,8 @@ class MainActivity : ComponentActivity() {
             // 动态轮询：前台 30s，后台 2min
             var nodesExpanded by remember { mutableStateOf(false) }
 
-            LaunchedEffect(isForeground, nodesExpanded) {
-                controller.pollIntervalMs = when {
-                    !isForeground -> 300000L  // background: 5 min
-                    isForeground && nodesExpanded -> 500L  // foreground + expanded: 0.5s
-                    else -> 30000L  // foreground + collapsed: 30s
-                }
-            }
-
             MoonTierApp(
+                isForeground = isForeground,
                 store = store,
                 controller = controller,
                 importToml = { importTomlLauncher.launch(arrayOf("text/*", "application/toml", "application/octet-stream")) },
@@ -284,6 +277,7 @@ private data class Palette(
 
 @Composable
 private fun MoonTierApp(
+    isForeground: Boolean,
     store: ConfigStore,
     controller: EasyTierController,
     importToml: () -> Unit,
@@ -291,6 +285,7 @@ private fun MoonTierApp(
     bindImportHandler: (((NetworkConfig) -> Unit, (String, String) -> Unit) -> Unit)
 ) {
     var settings by remember { mutableStateOf(store.loadSettings()) }
+    var nodesExpanded by remember { mutableStateOf(false) }
     var configs by remember { mutableStateOf(store.loadConfigs()) }
     var userServers by remember { mutableStateOf(store.loadUserServers()) }
     var officialServers by remember { mutableStateOf(store.loadOfficialServers()) }
@@ -306,6 +301,14 @@ private fun MoonTierApp(
         userServers = store.loadUserServers()
         officialServers = store.loadOfficialServers()
         settings = store.loadSettings()
+    }
+
+    LaunchedEffect(isForeground, nodesExpanded) {
+        controller.pollIntervalMs = when {
+            !isForeground -> 300000L
+            isForeground && nodesExpanded -> 500L
+            else -> 30000L
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -360,6 +363,8 @@ private fun MoonTierApp(
                 } else {
                     MainTabs(
                         palette = palette,
+                        nodesExpanded = nodesExpanded,
+                        onNodesExpandedChange = { nodesExpanded = it },
                         selectedTab = selectedTab,
                         onTab = { selectedTab = it },
                         configs = configs,
@@ -736,7 +741,7 @@ private fun ProfilesPage(
         }
         items(configs, key = { it.id }) { cfg ->
             val runningHere = runtime.running && runtime.runningConfigId == cfg.id
-            QCard(palette, modifier = Modifier.animateItemPlacement(tween(280))) {
+            QCard(palette, modifier = Modifier.animateContentSize(tween(280))) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(cfg.displayName, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
