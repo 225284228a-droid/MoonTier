@@ -92,6 +92,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -176,8 +177,6 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             // 动态轮询：前台 30s，后台 2min
-            var nodesExpanded by remember { mutableStateOf(false) }
-
             MoonTierApp(
                 isForeground = isForeground,
                 store = store,
@@ -811,12 +810,17 @@ private fun ServersPage(
     onDownloadUsers: (String) -> Unit,
     onSyncOfficial: () -> Unit
 ) {
-    var editable by remember(userServers) { mutableStateOf(userServers) }
+    var nextEditableServerId by remember { mutableLongStateOf(0L) }
+    var editable by remember { mutableStateOf(userServers.map { EditableServerItem(nextEditableServerId++, it) }) }
     var favoriteOpen by remember { mutableStateOf(false) }
     var officialOpen by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf("") }
-    var pendingDeleteIndex by remember { mutableIntStateOf(-1) }
-    var deletingIndex by remember { mutableIntStateOf(-1) }
+    var pendingDeleteId by remember { mutableLongStateOf(-1L) }
+    var deletingId by remember { mutableLongStateOf(-1L) }
+
+    LaunchedEffect(userServers) {
+        editable = syncEditableServerItems(editable, userServers) { nextEditableServerId++ }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -848,14 +852,19 @@ private fun ServersPage(
                 ) {
                     Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         QButton("新增收藏", palette, Modifier.fillMaxWidth(), icon = Icons.Rounded.Add) {
-                            editable = editable + ServerEntry(nextServerName(editable), "")
+                            editable = editable + EditableServerItem(
+                                id = nextEditableServerId++,
+                                server = ServerEntry(nextServerName(editable.map { it.server }), "")
+                            )
                         }
                         if (editable.isEmpty()) {
                             Text("暂无收藏服务器", color = palette.subText, fontSize = 13.sp)
                         }
-                        editable.forEachIndexed { index, server ->
+                        editable.forEach { item ->
+                            key(item.id) {
+                                val server = item.server
                             AnimatedVisibility(
-                                visible = index != deletingIndex,
+                                visible = item.id != deletingId,
                                 enter = expandVertically(animationSpec = tween(280)) + fadeIn(tween(200)),
                                 exit = shrinkVertically(animationSpec = tween(260)) + fadeOut(tween(180))
                             ) {
@@ -869,7 +878,14 @@ private fun ServersPage(
                                         value = server.name,
                                         placeholder = "名称",
                                         palette = palette,
-                                        onValueChange = { val next = editable.replaceAt(index, server.copy(name = it)); editable = next; if (next[index].address.isNotBlank()) onSaveUserServers(next) }
+                                        onValueChange = {
+                                            val next = editable.replaceServerItem(item.id, server.copy(name = it))
+                                            editable = next
+                                            next.firstOrNull { entry -> entry.id == item.id }
+                                                ?.server
+                                                ?.takeIf { updated -> updated.address.isNotBlank() }
+                                                ?.let { onSaveUserServers(next.map { entry -> entry.server }) }
+                                        }
                                     )
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                         QTextField(
@@ -877,13 +893,18 @@ private fun ServersPage(
                                             placeholder = "tcp://server.example.com:11010",
                                             palette = palette,
                                             modifier = Modifier.weight(1f),
-                                            onValueChange = { val next = editable.replaceAt(index, server.copy(address = it)); editable = next; if (it.isNotBlank()) onSaveUserServers(next) }
+                                            onValueChange = {
+                                                val next = editable.replaceServerItem(item.id, server.copy(address = it))
+                                                editable = next
+                                                if (it.isNotBlank()) onSaveUserServers(next.map { entry -> entry.server })
+                                            }
                                         )
-                                        IconButton(onClick = { pendingDeleteIndex = index }) {
+                                        IconButton(onClick = { pendingDeleteId = item.id }) {
                                             Icon(Icons.Rounded.Delete, null, tint = palette.error)
                                         }
                                     }
                                 }
+                            }
                             }
                         }
                     }
@@ -954,32 +975,32 @@ private fun ServersPage(
         }
     }
 
-    if (pendingDeleteIndex >= 0 && pendingDeleteIndex < editable.size) {
-        val server = editable[pendingDeleteIndex]
+    editable.firstOrNull { it.id == pendingDeleteId }?.let { deleting ->
+        val server = deleting.server
         AlertDialog(
-            onDismissRequest = { pendingDeleteIndex = -1 },
+            onDismissRequest = { pendingDeleteId = -1L },
             title = { Text("确认删除", color = palette.text, fontWeight = FontWeight.SemiBold) },
             text = { Text("确定要删除收藏服务器「${server.name.ifBlank { server.address }}」吗？", color = palette.subText, lineHeight = 20.sp) },
             confirmButton = {
                 QButton("删除", palette, compact = true, danger = true) {
-                    deletingIndex = pendingDeleteIndex
-                    pendingDeleteIndex = -1
+                    deletingId = deleting.id
+                    pendingDeleteId = -1L
                 }
             },
             dismissButton = {
-                QButton("取消", palette, primary = false, compact = true) { pendingDeleteIndex = -1 }
+                QButton("取消", palette, primary = false, compact = true) { pendingDeleteId = -1L }
             },
             containerColor = palette.surface,
             shape = RoundedCornerShape(22.dp)
         )
     }
-    LaunchedEffect(deletingIndex) {
-        if (deletingIndex >= 0) {
+    LaunchedEffect(deletingId) {
+        if (deletingId >= 0L) {
             delay(300)
-            val next = editable.filterIndexed { i, _ -> i != deletingIndex }
+            val next = editable.filterNot { it.id == deletingId }
             editable = next
-            onSaveUserServers(next)
-            deletingIndex = -1
+            onSaveUserServers(next.map { it.server })
+            deletingId = -1L
         }
     }
 }
@@ -1856,6 +1877,26 @@ private fun StatusDot(color: Color, size: Dp = 10.dp) {
 private fun FormLabel(text: String, palette: Palette) {
     Text(text, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 10.dp))
 }
+
+private data class EditableServerItem(
+    val id: Long,
+    val server: ServerEntry
+)
+
+private fun syncEditableServerItems(
+    current: List<EditableServerItem>,
+    incoming: List<ServerEntry>,
+    newId: () -> Long
+): List<EditableServerItem> {
+    val remaining = current.toMutableList()
+    return incoming.map { server ->
+        val matchIndex = remaining.indexOfFirst { it.server == server }
+        if (matchIndex >= 0) remaining.removeAt(matchIndex) else EditableServerItem(newId(), server)
+    }
+}
+
+private fun List<EditableServerItem>.replaceServerItem(id: Long, server: ServerEntry): List<EditableServerItem> =
+    map { item -> if (item.id == id) item.copy(server = server) else item }
 
 private fun <T> List<T>.replaceAt(index: Int, value: T): List<T> =
     mapIndexed { i, old -> if (i == index) value else old }
