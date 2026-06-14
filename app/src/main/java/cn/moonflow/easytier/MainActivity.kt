@@ -304,11 +304,7 @@ private fun MoonTierApp(
     }
 
     LaunchedEffect(isForeground, nodesExpanded) {
-        controller.pollIntervalMs = when {
-            !isForeground -> 300000L
-            isForeground && nodesExpanded -> 500L
-            else -> 30000L
-        }
+        controller.updatePollingConditions(isForeground, nodesExpanded)
     }
 
     LaunchedEffect(Unit) {
@@ -1439,13 +1435,7 @@ private fun AppleToast(
     }
 
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = { visible = false }
-            ),
+        modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter
     ) {
         AnimatedVisibility(
@@ -1467,6 +1457,11 @@ private fun AppleToast(
                     .clip(RoundedCornerShape(20.dp))
                     .background(palette.surface.copy(alpha = 0.97f))
                     .border(BorderStroke(0.5.dp, palette.border), RoundedCornerShape(20.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { visible = false }
+                    )
                     .padding(horizontal = 20.dp, vertical = 14.dp)
             ) {
                 Column {

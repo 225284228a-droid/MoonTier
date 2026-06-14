@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -31,7 +32,7 @@ class EasyTierController(
     private var lastLogKey = ""
     private var missedPolls = 0
     private var stalledPolls = 0
-    @Volatile var pollIntervalMs: Long = 30000
+    private val _pollIntervalMs = kotlinx.coroutines.flow.MutableStateFlow(30000L)
     private var directPublicIps = emptySet<String>()
 
     var state by mutableStateOf(RuntimeState())
@@ -167,9 +168,11 @@ class EasyTierController(
     }
 
     private suspend fun pollLoop(config: NetworkConfig) {
-        while (true) {
-            pollOnce(config)
-            delay(pollIntervalMs)
+        _pollIntervalMs.collectLatest { interval ->
+            while (true) {
+                pollOnce(config)
+                delay(interval)
+            }
         }
     }
 
@@ -400,8 +403,12 @@ class EasyTierController(
             .firstOrNull { it.isNotBlank() && !it.equals("localhost", ignoreCase = true) }
             ?: "Android-${id.take(8)}"
     }
-    fun setFastPolling(enabled: Boolean) {
-        pollIntervalMs = if (enabled) 500 else 30000
+    fun updatePollingConditions(isForeground: Boolean, expanded: Boolean) {
+        _pollIntervalMs.value = when {
+            !isForeground -> 300000L
+            isForeground && expanded -> 500L
+            else -> 30000L
+        }
     }
 
 }
