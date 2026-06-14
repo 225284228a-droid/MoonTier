@@ -176,8 +176,14 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             // 动态轮询：前台 30s，后台 2min
-            LaunchedEffect(isForeground) {
-                controller.pollIntervalMs = if (isForeground) 30000 else 120000
+            var nodesExpanded by remember { mutableStateOf(false) }
+
+            LaunchedEffect(isForeground, nodesExpanded) {
+                controller.pollIntervalMs = when {
+                    !isForeground -> 300000L  // background: 5 min
+                    isForeground && nodesExpanded -> 500L  // foreground + expanded: 0.5s
+                    else -> 30000L  // foreground + collapsed: 30s
+                }
             }
 
             MoonTierApp(
@@ -451,6 +457,8 @@ private fun ApplySystemBars(palette: Palette, darkMode: Boolean) {
 @Composable
 private fun MainTabs(
     palette: Palette,
+    nodesExpanded: Boolean,
+    onNodesExpandedChange: (Boolean) -> Unit,
     selectedTab: Int,
     onTab: (Int) -> Unit,
     configs: List<NetworkConfig>,
@@ -511,7 +519,7 @@ private fun MainTabs(
                 label = "tab"
             ) { index ->
                 when (index) {
-                    0 -> NetworkPage(palette, configs, runtime, onStart, onStop, onEdit)
+                    0 -> NetworkPage(palette, configs, runtime, nodesExpanded, onNodesExpandedChange, onStart, onStop, onEdit)
                     1 -> ProfilesPage(palette, configs, runtime, onStart, onStop, onEdit, onNewConfig, onImportToml, onDeleteConfig, onDefaultConfig, onExportConfig)
                     2 -> ServersPage(palette, userServers, officialServers, onSaveUserServers, onAddOfficialServer, onDownloadUsers, onSyncOfficial)
                     else -> SettingsPage(palette, settings, onSettings)
@@ -527,6 +535,8 @@ private fun NetworkPage(
     palette: Palette,
     configs: List<NetworkConfig>,
     runtime: RuntimeState,
+    nodesExpanded: Boolean,
+    onNodesExpandedChange: (Boolean) -> Unit,
     onStart: (NetworkConfig) -> Unit,
     onStop: () -> Unit,
     onEdit: (NetworkConfig) -> Unit
@@ -611,7 +621,7 @@ private fun NetworkPage(
                                 onClick = onStop
                             )
                         }
-                        RunningStatus(palette, runtime, current.displayName)
+                        RunningStatus(palette, runtime, nodesExpanded, onNodesExpandedChange, current.displayName)
                     }
                 }
             }
@@ -620,9 +630,8 @@ private fun NetworkPage(
 }
 
 @Composable
-private fun RunningStatus(palette: Palette, runtime: RuntimeState, label: String) {
+private fun RunningStatus(palette: Palette, runtime: RuntimeState, nodesExpanded: Boolean, onNodesExpandedChange: (Boolean) -> Unit, label: String) {
     var logsExpanded by remember { mutableStateOf(false) }
-    var nodesExpanded by remember(runtime.runningConfigId, runtime.localCidr) { mutableStateOf(false) }
     QCard(palette, modifier = Modifier.fillMaxWidth()) {
         Text(label, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Text(runtime.statusText, color = palette.subText, fontSize = 13.sp, modifier = Modifier.padding(top = 3.dp))
@@ -641,7 +650,7 @@ private fun RunningStatus(palette: Palette, runtime: RuntimeState, label: String
                     fontSize = 12.sp
                 )
             }
-            ExpandArrow(nodesExpanded, palette) { nodesExpanded = !nodesExpanded }
+            ExpandArrow(nodesExpanded, palette) { onNodesExpandedChange(!nodesExpanded) }
         }
         AnimatedVisibility(visible = nodesExpanded, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
             Column {
