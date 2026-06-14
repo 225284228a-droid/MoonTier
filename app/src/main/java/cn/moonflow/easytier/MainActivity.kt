@@ -789,6 +789,7 @@ private fun ProfilesPage(
             containerColor = palette.surface,
             shape = RoundedCornerShape(22.dp)
         )
+    }
     LaunchedEffect(deletingConfigId) {
         deletingConfigId?.let { id ->
             delay(300)
@@ -797,7 +798,7 @@ private fun ProfilesPage(
             deletingConfigId = null
         }
     }
-    }}
+}
 
 
 @Composable
@@ -811,6 +812,7 @@ private fun ServersPage(
     onSyncOfficial: () -> Unit
 ) {
     var editable by remember(userServers) { mutableStateOf(userServers) }
+    var favoriteOpen by remember { mutableStateOf(false) }
     var officialOpen by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf("") }
     var pendingDeleteIndex by remember { mutableIntStateOf(-1) }
@@ -826,57 +828,72 @@ private fun ServersPage(
     ) {
         item { Header("服务器", "用户收藏和官方源分开管理", palette) }
         item {
-            QButton("新增收藏", palette, Modifier.fillMaxWidth(), icon = Icons.Rounded.Add) {
-                editable = editable + ServerEntry(nextServerName(editable), "")
-            }
-        }
-        item {
             QCard(palette) {
-                Text("用户收藏", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                Spacer(Modifier.height(10.dp))
-                if (editable.isEmpty()) {
-                    Text("暂无收藏服务器", color = palette.subText, fontSize = 13.sp)
-                editable.forEachIndexed { index, server ->
-                    AnimatedVisibility(
-                        visible = index != deletingIndex,
-                        enter = expandVertically(animationSpec = tween(280)) + fadeIn(tween(200)),
-                        exit = shrinkVertically(animationSpec = tween(260)) + fadeOut(tween(180))
-                    ) {
-                    Column(
-                        Modifier
-                            .padding(vertical = 6.dp)
-                            .animateContentSize(tween(220)),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        QTextField(
-                            value = server.name,
-                            placeholder = "??",
-                            palette = palette,
-                            onValueChange = {
-                                val next = editable.replaceAt(index, server.copy(name = it))
-                                editable = next
-                                if (next[index].address.isNotBlank()) onSaveUserServers(next)
-                            }
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            QTextField(
-                                value = server.address,
-                                placeholder = "tcp://server.example.com:11010",
-                                palette = palette,
-                                modifier = Modifier.weight(1f),
-                                onValueChange = {
-                                    val next = editable.replaceAt(index, server.copy(address = it))
-                                    editable = next
-                                    if (it.isNotBlank()) onSaveUserServers(next)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("用户收藏", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                        Text("${editable.size} 个服务器", color = palette.subText, fontSize = 12.sp)
+                    }
+                    ExpandArrow(favoriteOpen, palette) { favoriteOpen = !favoriteOpen }
+                }
+                AnimatedVisibility(
+                    visible = favoriteOpen,
+                    enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(160)),
+                    exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(120))
+                ) {
+                    Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        QButton("新增收藏", palette, Modifier.fillMaxWidth(), icon = Icons.Rounded.Add) {
+                            editable = editable + ServerEntry(nextServerName(editable), "")
+                        }
+                        if (editable.isEmpty()) {
+                            Text("暂无收藏服务器", color = palette.subText, fontSize = 13.sp)
+                        }
+                        editable.forEachIndexed { index, server ->
+                            AnimatedVisibility(
+                                visible = index != deletingIndex,
+                                enter = expandVertically(animationSpec = tween(280)) + fadeIn(tween(200)),
+                                exit = shrinkVertically(animationSpec = tween(260)) + fadeOut(tween(180))
+                            ) {
+                                Column(
+                                    Modifier
+                                        .padding(vertical = 6.dp)
+                                        .animateContentSize(tween(220)),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    QTextField(
+                                        value = server.name,
+                                        placeholder = "名称",
+                                        palette = palette,
+                                        onValueChange = { editable = editable.replaceAt(index, server.copy(name = it)) }
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        QTextField(
+                                            value = server.address,
+                                            placeholder = "tcp://server.example.com:11010",
+                                            palette = palette,
+                                            modifier = Modifier.weight(1f),
+                                            onValueChange = { editable = editable.replaceAt(index, server.copy(address = it)) }
+                                        )
+                                        IconButton(onClick = { pendingDeleteIndex = index }) {
+                                            Icon(Icons.Rounded.Delete, null, tint = palette.error)
+                                        }
+                                    }
                                 }
-                            )
-                            IconButton(onClick = { pendingDeleteIndex = index }) {
-                                Icon(Icons.Rounded.Delete, null, tint = palette.error)
+                            }
+                        }
+                        if (editable.isNotEmpty()) {
+                            Spacer(Modifier.height(4.dp))
+                            QButton("保存收藏", palette, Modifier.fillMaxWidth()) {
+                                val valid = editable.filter { it.address.isNotBlank() }
+                                onSaveUserServers(valid.distinctBy { it.address.lowercase() })
                             }
                         }
                     }
-                    }
-                }
                 }
             }
         }
@@ -944,7 +961,7 @@ private fun ServersPage(
         }
     }
 
-        if (pendingDeleteIndex >= 0 && pendingDeleteIndex < editable.size) {
+    if (pendingDeleteIndex >= 0 && pendingDeleteIndex < editable.size) {
         val server = editable[pendingDeleteIndex]
         AlertDialog(
             onDismissRequest = { pendingDeleteIndex = -1 },
@@ -962,6 +979,7 @@ private fun ServersPage(
             containerColor = palette.surface,
             shape = RoundedCornerShape(22.dp)
         )
+    }
     LaunchedEffect(deletingIndex) {
         if (deletingIndex >= 0) {
             delay(300)
@@ -971,7 +989,7 @@ private fun ServersPage(
             deletingIndex = -1
         }
     }
-    }}
+}
 
 
 @Composable
