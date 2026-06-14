@@ -718,6 +718,7 @@ private fun ProfilesPage(
     onExport: (NetworkConfig) -> Unit
 ) {
     var pendingDeleteConfig by remember { mutableStateOf<NetworkConfig?>(null) }
+    var deletingConfigId by remember { mutableStateOf<String?>(null) }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -737,6 +738,10 @@ private fun ProfilesPage(
         }
         items(configs, key = { it.id }) { cfg ->
             val runningHere = runtime.running && runtime.runningConfigId == cfg.id
+            AnimatedVisibility(
+                visible = cfg.id != deletingConfigId,
+                exit = shrinkVertically(animationSpec = tween(280)) + fadeOut(tween(200))
+            ) {
             QCard(palette, modifier = Modifier.animateContentSize(tween(280))) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -763,6 +768,7 @@ private fun ProfilesPage(
                     QButton("删除", palette, Modifier.weight(1f), primary = false, dangerText = true, icon = Icons.Rounded.Delete, enabled = !runningHere, onClick = { pendingDeleteConfig = cfg })
                 }
             }
+            }
         }
     }
 
@@ -773,7 +779,7 @@ private fun ProfilesPage(
             text = { Text("确定要删除配置「${cfg.displayName}」吗？此操作不可撤销。", color = palette.subText, lineHeight = 20.sp) },
             confirmButton = {
                 QButton("删除", palette, compact = true, danger = true) {
-                    onDelete(cfg)
+                    deletingConfigId = cfg.id
                     pendingDeleteConfig = null
                 }
             },
@@ -783,7 +789,16 @@ private fun ProfilesPage(
             containerColor = palette.surface,
             shape = RoundedCornerShape(22.dp)
         )
+    LaunchedEffect(deletingConfigId) {
+        deletingConfigId?.let { id ->
+            delay(300)
+            val cfg = configs.firstOrNull { it.id == id }
+            if (cfg != null) onDelete(cfg)
+            deletingConfigId = null
+        }
+    }
     }}
+
 
 @Composable
 private fun ServersPage(
@@ -799,6 +814,7 @@ private fun ServersPage(
     var officialOpen by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf("") }
     var pendingDeleteIndex by remember { mutableIntStateOf(-1) }
+    var deletingIndex by remember { mutableIntStateOf(-1) }
 
     LazyColumn(
         modifier = Modifier
@@ -820,8 +836,12 @@ private fun ServersPage(
                 Spacer(Modifier.height(10.dp))
                 if (editable.isEmpty()) {
                     Text("暂无收藏服务器", color = palette.subText, fontSize = 13.sp)
-                }
                 editable.forEachIndexed { index, server ->
+                    AnimatedVisibility(
+                        visible = index != deletingIndex,
+                        enter = expandVertically(animationSpec = tween(280)) + fadeIn(tween(200)),
+                        exit = shrinkVertically(animationSpec = tween(260)) + fadeOut(tween(180))
+                    ) {
                     Column(
                         Modifier
                             .padding(vertical = 6.dp)
@@ -830,7 +850,7 @@ private fun ServersPage(
                     ) {
                         QTextField(
                             value = server.name,
-                            placeholder = "名称",
+                            placeholder = "??",
                             palette = palette,
                             onValueChange = {
                                 val next = editable.replaceAt(index, server.copy(name = it))
@@ -855,6 +875,8 @@ private fun ServersPage(
                             }
                         }
                     }
+                    }
+                }
                 }
             }
         }
@@ -930,9 +952,7 @@ private fun ServersPage(
             text = { Text("确定要删除收藏服务器「${server.name.ifBlank { server.address }}」吗？", color = palette.subText, lineHeight = 20.sp) },
             confirmButton = {
                 QButton("删除", palette, compact = true, danger = true) {
-                    val next = editable.filterIndexed { i, _ -> i != pendingDeleteIndex }
-                    editable = next
-                    onSaveUserServers(next)
+                    deletingIndex = pendingDeleteIndex
                     pendingDeleteIndex = -1
                 }
             },
@@ -942,7 +962,17 @@ private fun ServersPage(
             containerColor = palette.surface,
             shape = RoundedCornerShape(22.dp)
         )
+    LaunchedEffect(deletingIndex) {
+        if (deletingIndex >= 0) {
+            delay(300)
+            val next = editable.filterIndexed { i, _ -> i != deletingIndex }
+            editable = next
+            onSaveUserServers(next)
+            deletingIndex = -1
+        }
+    }
     }}
+
 
 @Composable
 private fun SettingsPage(
@@ -1283,6 +1313,7 @@ private fun ActionBar(palette: Palette, content: @Composable RowScope.() -> Unit
             .background(palette.surfaceVariant)
             .border(BorderStroke(0.8.dp, palette.border), RoundedCornerShape(22.dp))
             .padding(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         content = content
     )
