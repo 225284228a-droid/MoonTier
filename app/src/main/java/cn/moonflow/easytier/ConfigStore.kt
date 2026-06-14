@@ -29,7 +29,11 @@ class ConfigStore(private val context: Context) {
         }
 
         val array = runCatching { JSONArray(readTextAtomic(configsFile)) }.getOrNull()
-            ?: return normalizeConfigs(emptyList())
+            ?: run {
+                val defaults = listOf(NetworkConfig.defaultConfig())
+                saveConfigs(defaults)
+                return defaults
+            }
         val configs = ArrayList<NetworkConfig>()
         for (i in 0 until array.length()) {
             val obj = array.optJSONObject(i) ?: continue
