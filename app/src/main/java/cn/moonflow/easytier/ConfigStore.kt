@@ -102,12 +102,13 @@ class ConfigStore(private val context: Context) {
 
     suspend fun downloadUserServers(source: String): SyncResult =
         withContext(Dispatchers.IO) {
-            val text = fetchServerText(source)
-            val addresses = parseServerAddresses(text)
+            val allAddresses = LinkedHashSet<String>()
+            val visited = HashSet<String>()
+            fetchServerSourcesRecursive(source, allAddresses, visited, depth = 0)
             val current = loadUserServers()
             val existing = current.map { it.address.lowercase() }.toHashSet()
             val usedNames = current.map { it.name }.toMutableList()
-            val added = addresses
+            val added = allAddresses
                 .filter { existing.add(it.lowercase()) }
                 .map {
                     val name = nextServerNameFromNames(usedNames, serverNameFromAddress(it))
@@ -117,6 +118,43 @@ class ConfigStore(private val context: Context) {
             saveUserServers(current + added)
             SyncResult(true, added.size, if (added.isEmpty()) "没有发现新的用户收藏服务器" else "已添加 ${added.size} 个服务器")
         }
+
+    private fun fetchServerSourcesRecursive(
+        source: String,
+        out: LinkedHashSet<String>,
+        visited: HashSet<String>,
+        depth: Int
+    ) {
+        if (depth >= 5) return  // 最多递归5层，防止无限循环
+        val key = source.trim().lowercase()
+        if (!visited.add(key)) return  // 已访问过，跳过
+
+        val text = runCatching { fetchServerText(source) }.getOrNull() ?: return
+
+        // 解析服务器地址
+        val addresses = parseServerAddresses(text)
+        out.addAll(addresses)
+
+        // 从文本中提取额外的递归源（TXT 域名 或 HTTP(S) URL）
+        val recursiveSources = extractRecursiveSources(text)
+        for (nextSource in recursiveSources) {
+            fetchServerSourcesRecursive(nextSource, out, visited, depth + 1)
+        }
+    }
+
+    private fun extractRecursiveSources(text: String): List<String> {
+        val sources = ArrayList<String>()
+        // 匹配 TXT 记录域名（纯域名，不含协议头）
+        val domainPattern = Pattern.compile("(?i)(?:^|\\s)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}(?:\\.[a-z]{2,})?(?=\\s|\$|,|;)", Pattern.MULTILINE)
+        val txtMatcher = domainPattern.matcher(text)
+        while (txtMatcher.find()) {
+            val domain = txtMatcher.group()?.trim().orEmpty()
+            if (domain.isNotBlank() && !domain.startsWith("http") && !domain.contains("://") && domain.contains(".")) {
+                sources.add(domain)
+            }
+        }
+        return sources
+    }
 
     private fun normalizeConfigs(configs: List<NetworkConfig>): List<NetworkConfig> {
         if (configs.isEmpty()) return emptyList()

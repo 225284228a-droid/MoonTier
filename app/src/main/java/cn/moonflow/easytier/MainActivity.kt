@@ -6,6 +6,8 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.view.View
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -21,8 +23,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -85,6 +87,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -158,6 +161,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var isForeground by mutableStateOf(true)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = ConfigStore(applicationContext)
@@ -166,6 +171,11 @@ class MainActivity : ComponentActivity() {
         window.attributes = window.attributes.apply { preferredRefreshRate = 120f }
 
         setContent {
+            // 动态轮询：前台 30s，后台 2min
+            LaunchedEffect(isForeground) {
+                controller.pollIntervalMs = if (isForeground) 30000 else 120000
+            }
+
             MoonTierApp(
                 store = store,
                 controller = controller,
@@ -180,6 +190,11 @@ class MainActivity : ComponentActivity() {
                 }
             )
         }
+
+        lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) { isForeground = true }
+            override fun onStop(owner: LifecycleOwner) { isForeground = false }
+        })
     }
 
     override fun onDestroy() {
@@ -313,8 +328,8 @@ private fun MoonTierApp(
             AnimatedContent(
                 targetState = editingConfig,
                 transitionSpec = {
-                    (fadeIn(tween(180)) + slideInHorizontally(tween(240)) { it / 12 })
-                        .togetherWith(fadeOut(tween(130)) + slideOutHorizontally(tween(180)) { -it / 12 })
+                    (fadeIn(tween(180)) + scaleIn(initialScale = 0.92f, animationSpec = tween(240)) + fadeIn(tween(240)))
+                        .togetherWith(fadeOut(tween(130)) + scaleOut(targetScale = 0.92f, animationSpec = tween(180)))
                 },
                 label = "screen"
             ) { editing ->
@@ -416,7 +431,7 @@ private fun MoonTierApp(
                     title = { Text(title, color = palette.text, fontWeight = FontWeight.SemiBold) },
                     text = { Text(body, color = palette.subText, lineHeight = 20.sp) },
                     containerColor = palette.surface,
-                    shape = RoundedCornerShape(18.dp)
+                    shape = RoundedCornerShape(22.dp)
                 )
             }
         }
@@ -495,8 +510,8 @@ private fun MainTabs(
                 targetState = selectedTab,
                 transitionSpec = {
                     val dir = if (targetState > initialState) 1 else -1
-                    (fadeIn(tween(170)) + slideInHorizontally(tween(230)) { it * dir / 8 })
-                        .togetherWith(fadeOut(tween(120)) + slideOutHorizontally(tween(190)) { -it * dir / 8 })
+                    (fadeIn(tween(170)) + scaleIn(initialScale = 0.94f, animationSpec = tween(230)) + fadeIn(tween(230)))
+                        .togetherWith(fadeOut(tween(120)) + scaleOut(targetScale = 0.94f, animationSpec = tween(190)))
                 },
                 label = "tab"
             ) { index ->
@@ -546,16 +561,14 @@ private fun NetworkPage(
             AnimatedContent(
                 targetState = runtime.running,
                 transitionSpec = {
-                    (fadeIn(tween(180)) + slideInHorizontally(tween(180)) { it / 18 })
-                        .togetherWith(fadeOut(tween(140)) + slideOutHorizontally(tween(140)) { -it / 18 })
+                    (fadeIn(tween(180)) + scaleIn(initialScale = 0.94f, animationSpec = tween(200)) + fadeIn(tween(200)))
+                        .togetherWith(fadeOut(tween(140)) + scaleOut(targetScale = 0.94f, animationSpec = tween(140)))
                 },
                 label = "network-mode"
             ) { running ->
                 if (!running) {
                     QCard(palette) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            StatusDot(palette.subText)
-                            Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(current.displayName, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                                 Text(current.networkName.ifBlank { "尚未填写网络名称" }, color = palette.subText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -647,7 +660,7 @@ private fun RunningStatus(palette: Palette, runtime: RuntimeState, label: String
                                 .padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            StatusDot(if (node.local) palette.accent else palette.success)
+                            StatusDot(if (node.local) palette.subText else palette.subText)
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(node.hostname, color = palette.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -673,7 +686,7 @@ private fun RunningStatus(palette: Palette, runtime: RuntimeState, label: String
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(14.dp))
                     .background(palette.surfaceVariant)
                     .padding(10.dp)
             ) {
@@ -720,8 +733,6 @@ private fun ProfilesPage(
             val runningHere = runtime.running && runtime.runningConfigId == cfg.id
             QCard(palette) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusDot(if (runningHere) palette.success else if (cfg.isDefault) palette.accent else palette.subText)
-                    Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text(cfg.displayName, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(cfg.networkName.ifBlank { "尚未填写网络名称" }, color = palette.subText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -853,7 +864,7 @@ private fun ServersPage(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(14.dp))
                                     .background(palette.surfaceVariant)
                                     .padding(10.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -939,7 +950,7 @@ private fun SettingsPage(
                 )
             },
             containerColor = palette.surface,
-            shape = RoundedCornerShape(18.dp)
+            shape = RoundedCornerShape(22.dp)
         )
     }
 }
@@ -1221,9 +1232,9 @@ private fun ActionBar(palette: Palette, content: @Composable RowScope.() -> Unit
         modifier = Modifier
             .fillMaxWidth()
             .height(52.dp)
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(22.dp))
             .background(palette.surfaceVariant)
-            .border(BorderStroke(0.8.dp, palette.border), RoundedCornerShape(18.dp))
+            .border(BorderStroke(0.8.dp, palette.border), RoundedCornerShape(22.dp))
             .padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         content = content
@@ -1266,9 +1277,9 @@ private fun QSelect(
         modifier = Modifier
             .fillMaxWidth()
             .height(44.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(palette.surfaceVariant)
-            .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(12.dp))
+            .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(14.dp))
             .clickable { open = true }
             .padding(horizontal = 16.dp),
         contentAlignment = Alignment.CenterStart
@@ -1364,9 +1375,9 @@ private fun QCard(palette: Palette, modifier: Modifier = Modifier, content: @Com
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(palette.surface)
-            .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(8.dp))
+            .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(14.dp))
             .padding(16.dp),
         content = content
     )
@@ -1405,7 +1416,7 @@ private fun QButton(
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(16.dp))
             .background(bg)
-            .then(if (dangerText) Modifier.border(BorderStroke(0.8.dp, palette.error), RoundedCornerShape(16.dp)) else Modifier)
+            .then(if (dangerText) Modifier.border(BorderStroke(0.8.dp, if (enabled) palette.error else palette.border.copy(alpha = 0.35f)), RoundedCornerShape(22.dp)) else Modifier)
             .clickable(source, indication = null, enabled = enabled) { onClick() },
         contentAlignment = Alignment.Center
     ) {
@@ -1440,9 +1451,9 @@ private fun QTextField(
         modifier = modifier
             .fillMaxWidth()
             .height(if (singleLine) 44.dp else 88.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(palette.surfaceVariant)
-            .border(BorderStroke(if (focused) 1.2.dp else 0.7.dp, if (focused) palette.accent.copy(alpha = 0.82f) else palette.border), RoundedCornerShape(12.dp))
+            .border(BorderStroke(if (focused) 1.2.dp else 0.7.dp, if (focused) palette.accent.copy(alpha = 0.82f) else palette.border), RoundedCornerShape(14.dp))
             .padding(horizontal = 16.dp, vertical = 9.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -1478,13 +1489,13 @@ private fun SwitchRow(text: String, checked: Boolean, palette: Palette, onChecke
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(42.dp),
+            .height(48.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(text, color = palette.text, fontSize = 14.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
         Box(
             modifier = Modifier
-                .size(width = 44.dp, height = 26.dp)
+                .size(width = 48.dp, height = 28.dp)
                 .graphicsLayer { scaleX = scale; scaleY = scale }
                 .clip(CircleShape)
                 .background(if (checked) palette.accent else palette.secondaryButton)
@@ -1548,7 +1559,7 @@ private fun ServerPickerDialog(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(RoundedCornerShape(13.dp))
                                     .background(palette.surfaceVariant)
                                     .clickable(enabled = !alreadyAdded) {
                                         selected = if (checked) selected - addressKey else selected + addressKey
@@ -1597,7 +1608,7 @@ private fun ServerPickerDialog(
             QButton("取消", palette, Modifier.width(82.dp), primary = false, compact = true, onClick = onDismiss)
         },
         containerColor = palette.surface,
-        shape = RoundedCornerShape(20.dp)
+        shape = RoundedCornerShape(22.dp)
     )
 }
 
@@ -1623,7 +1634,7 @@ private fun ListEditor(
             .fillMaxWidth()
             .animateContentSize(tween(220))
     ) {
-        FormLabel(title)
+        FormLabel(title, palette)
         local.forEachIndexed { index, value ->
             Row(
                 modifier = Modifier.padding(top = 8.dp),
@@ -1695,8 +1706,8 @@ private fun StatusDot(color: Color, size: Dp = 10.dp) {
 }
 
 @Composable
-private fun FormLabel(text: String) {
-    Text(text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 10.dp))
+private fun FormLabel(text: String, palette: Palette) {
+    Text(text, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 10.dp))
 }
 
 private fun <T> List<T>.replaceAt(index: Int, value: T): List<T> =

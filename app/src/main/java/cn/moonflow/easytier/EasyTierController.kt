@@ -13,7 +13,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -28,6 +30,8 @@ class EasyTierController(
     private var vpnSignature = ""
     private var lastLogKey = ""
     private var missedPolls = 0
+    private var stalledPolls = 0
+    @Volatile var pollIntervalMs: Long = 30000
     private var directPublicIps = emptySet<String>()
 
     var state by mutableStateOf(RuntimeState())
@@ -47,6 +51,7 @@ class EasyTierController(
             vpnSignature = ""
             lastLogKey = ""
             missedPolls = 0
+        stalledPolls = 0
             state = RuntimeState(starting = true, statusText = "正在启动 ${normalized.displayName}")
 
             val toml = TomlCodec.build(runtimeConfig)
@@ -81,7 +86,7 @@ class EasyTierController(
     fun attachIfRunning(configs: List<NetworkConfig>) {
         if (state.running || state.starting || state.stopping || pollJob != null) return
         scope.launch {
-            val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(32).orEmpty() }
+            val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(8).orEmpty() }
             val outer = runCatching { JSONObject(raw) }.getOrNull() ?: return@launch
             val config = configs.firstOrNull { outer.optJSONObject(it.instanceName) != null } ?: return@launch
             runningConfig = config
@@ -89,6 +94,7 @@ class EasyTierController(
             vpnSignature = ""
             lastLogKey = ""
             missedPolls = 0
+        stalledPolls = 0
             state = RuntimeState(
                 running = true,
                 runningConfigId = config.id,
@@ -121,16 +127,26 @@ class EasyTierController(
     }
 
     private suspend fun stopRuntime(statusText: String, logMessage: String, wait: Boolean) {
-        pollJob?.cancel()
+        val poll = pollJob
         pollJob = null
+        poll?.cancel()
+        // 等待轮询循环完全退出，避免与 FFI 互斥锁竞争
+        runCatching { kotlinx.coroutines.withTimeout(2000L) { poll?.join() } }
         val stopIntent = Intent(context, EasyTierVpnService::class.java)
             .setAction(EasyTierVpnService.ACTION_STOP)
         runCatching { context.startService(stopIntent) }
         context.stopService(Intent(context, EasyTierVpnService::class.java))
-        withContext(Dispatchers.IO) { NativeEasyTier.stopAllInstances() }
+        withContext(NonCancellable) {
+            runCatching {
+                withTimeout(3000L) {
+                    withContext(Dispatchers.IO) { NativeEasyTier.stopAllInstances() }
+                }
+            }
+        }
         runningConfig = null
         vpnSignature = ""
         missedPolls = 0
+        stalledPolls = 0
         directPublicIps = emptySet()
         state = RuntimeState(statusText = statusText, logs = (state.logs + logMessage).takeLast(240))
         if (wait) delay(180)
@@ -146,18 +162,19 @@ class EasyTierController(
         runningConfig = null
         vpnSignature = ""
         missedPolls = 0
+        stalledPolls = 0
         state = RuntimeState(statusText = "启动失败", logs = listOf(message))
     }
 
     private suspend fun pollLoop(config: NetworkConfig) {
         while (true) {
             pollOnce(config)
-            delay(1800)
+            delay(pollIntervalMs)
         }
     }
 
     private suspend fun pollOnce(config: NetworkConfig) {
-        val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(32).orEmpty() }
+        val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(8).orEmpty() }
         if (raw.isBlank()) {
             convergeMissingInstance("状态读取为空，网络实例可能已退出")
             return
@@ -174,6 +191,7 @@ class EasyTierController(
             return
         }
         missedPolls = 0
+        stalledPolls = 0
         val localCidr = extractLocalCidr(info)
         val proxyCidrs = collectPeerProxyCidrs(info)
         val nodes = parseNodes(info)
@@ -190,6 +208,15 @@ class EasyTierController(
         )
         if (logs.isNotEmpty()) next = next.copy(logs = (next.logs + logs).takeLast(240))
         state = next
+        if (state.running && localCidr.isBlank() && nodes.isEmpty()) {
+            stalledPolls++
+            if (stalledPolls >= 3) {
+                convergeMissingInstance("网络实例无响应")
+                return
+            }
+        } else {
+            stalledPolls = 0
+        }
 
         if (localCidr.isNotBlank() && !config.noTun) {
             val settings = store.loadSettings()
@@ -225,15 +252,29 @@ class EasyTierController(
     private suspend fun convergeMissingInstance(message: String) {
         missedPolls += 1
         if (missedPolls < 2) return
-        val job = pollJob
+        val poll = pollJob
+        pollJob = null
         runningConfig = null
         vpnSignature = ""
         missedPolls = 0
+        stalledPolls = 0
         directPublicIps = emptySet()
-        withContext(Dispatchers.IO) { NativeEasyTier.stopAllInstances() }
+        // 停止 VPN 服务
+        val stopIntent = Intent(context, EasyTierVpnService::class.java)
+            .setAction(EasyTierVpnService.ACTION_STOP)
+        runCatching { context.startService(stopIntent) }
+        context.stopService(Intent(context, EasyTierVpnService::class.java))
+        // 等待轮询循环退出后释放原生实例
+        poll?.cancel()
+        runCatching { kotlinx.coroutines.withTimeout(2000L) { poll?.join() } }
+        withContext(NonCancellable) {
+            runCatching {
+                withTimeout(3000L) {
+                    withContext(Dispatchers.IO) { NativeEasyTier.stopAllInstances() }
+                }
+            }
+        }
         state = RuntimeState(statusText = "实例已退出", logs = (state.logs + message).takeLast(240))
-        pollJob = null
-        job?.cancel()
     }
 
     private fun firstJsonObject(obj: JSONObject): JSONObject? {
@@ -304,10 +345,16 @@ class EasyTierController(
                 ?.optLong("addr", 0L) ?: 0L
             val ip = if (addr == 0L) "" else Ipv4.intToAddress(addr)
             val isServer = route.optJSONObject("feature_flag")?.optBoolean("is_public_server", false) == true
+            val cost = route.optInt("cost", 1)
+            val connectionType = when {
+                isServer -> "服务器"
+                cost > 1 -> "中继($cost)"
+                else -> "直连"
+            }
             out += NodeInfo(
-                hostname = route.optString("hostname").ifBlank { if (isServer) "公共服务器" else "节点" },
+                hostname = route.optString("hostname").ifBlank { if (isServer) "公共服务器" else connectionType },
                 ip = ip,
-                role = if (isServer) "服务器" else "节点",
+                role = connectionType,
                 latencyMs = route.optInt("path_latency", -1),
                 local = false
             )
@@ -353,4 +400,8 @@ class EasyTierController(
             .firstOrNull { it.isNotBlank() && !it.equals("localhost", ignoreCase = true) }
             ?: "Android-${id.take(8)}"
     }
+    fun setFastPolling(enabled: Boolean) {
+        pollIntervalMs = if (enabled) 500 else 30000
+    }
+
 }

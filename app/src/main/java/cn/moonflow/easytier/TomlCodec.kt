@@ -1,5 +1,7 @@
 package cn.moonflow.easytier
 
+import android.util.Log
+
 object TomlCodec {
     fun build(config: NetworkConfig): String {
         val out = ArrayList<String>()
@@ -179,7 +181,10 @@ object TomlCodec {
             when (it) {
                 "true" -> true
                 "false" -> false
-                else -> default
+                else -> {
+                    Log.w("TomlCodec", "Unexpected bool value: \"$value\", falling back to $default")
+                    default
+                }
             }
         } ?: default
 
