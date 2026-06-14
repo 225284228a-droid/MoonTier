@@ -25,6 +25,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -111,6 +113,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -418,20 +421,11 @@ private fun MoonTierApp(
             }
 
             dialog?.let { (title, body) ->
-                AlertDialog(
-                    onDismissRequest = { dialog = null },
-                    confirmButton = {
-                        QButton(
-                            text = "关闭",
-                            palette = palette,
-                            compact = true,
-                            onClick = { dialog = null }
-                        )
-                    },
-                    title = { Text(title, color = palette.text, fontWeight = FontWeight.SemiBold) },
-                    text = { Text(body, color = palette.subText, lineHeight = 20.sp) },
-                    containerColor = palette.surface,
-                    shape = RoundedCornerShape(22.dp)
+                AppleToast(
+                    title = title,
+                    body = body,
+                    palette = palette,
+                    onDismiss = { dialog = null }
                 )
             }
         }
@@ -1367,6 +1361,65 @@ private fun Header(title: String, subtitle: String, palette: Palette, modifier: 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Text(title, color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         if (subtitle.isNotBlank()) Text(subtitle, color = palette.subText, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun AppleToast(
+    title: String,
+    body: String,
+    palette: Palette,
+    onDismiss: () -> Unit
+) {
+    var visible by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        visible = true
+        delay(2800)
+        visible = false
+        delay(320)
+        onDismiss()
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = { visible = false }
+            ),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        AnimatedVisibility(
+            visible = visible,
+            enter = slideInVertically(
+                initialOffsetY = { -it },
+                animationSpec = tween(320, delayMillis = 0)
+            ) + fadeIn(tween(240)),
+            exit = slideOutVertically(
+                targetOffsetY = { -it },
+                animationSpec = tween(260)
+            ) + fadeOut(tween(200))
+        ) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 56.dp)
+                    .padding(horizontal = 24.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(palette.surface.copy(alpha = 0.97f))
+                    .border(BorderStroke(0.5.dp, palette.border), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 20.dp, vertical = 14.dp)
+            ) {
+                Column {
+                    Text(title, color = palette.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    if (body.isNotBlank()) {
+                        Text(body, color = palette.subText, fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
+        }
     }
 }
 
