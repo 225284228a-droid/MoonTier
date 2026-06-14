@@ -1482,7 +1482,7 @@ private fun QTextField(
 
 @Composable
 private fun SwitchRow(text: String, checked: Boolean, palette: Palette, onChecked: (Boolean) -> Unit) {
-    val thumbOffset by animateDpAsState(if (checked) 18.dp else 0.dp, tween(180), label = "switch-thumb")
+    val thumbOffset by animateDpAsState(if (checked) 20.dp else 0.dp, tween(180), label = "switch-thumb")
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.96f else 1f, tween(130), label = "switch-scale")
@@ -1505,7 +1505,7 @@ private fun SwitchRow(text: String, checked: Boolean, palette: Palette, onChecke
         ) {
             Box(
                 modifier = Modifier
-                    .padding(start = 3.dp)
+                    .padding(start = 4.dp)
                     .graphicsLayer { translationX = thumbOffset.toPx() }
                     .size(20.dp)
                     .clip(CircleShape)
