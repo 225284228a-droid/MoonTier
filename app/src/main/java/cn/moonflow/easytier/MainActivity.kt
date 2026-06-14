@@ -1563,7 +1563,7 @@ private fun QButton(
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(16.dp))
             .background(bg)
-            .then(if (dangerText) Modifier.border(BorderStroke(0.8.dp, if (enabled) palette.error else palette.border.copy(alpha = 0.35f)), RoundedCornerShape(22.dp)) else Modifier)
+            .then(if (dangerText) Modifier.border(BorderStroke(0.8.dp, if (enabled) palette.error else palette.border.copy(alpha = 0.35f)), RoundedCornerShape(16.dp)) else Modifier)
             .clickable(source, indication = null, enabled = enabled) { onClick() },
         contentAlignment = Alignment.Center
     ) {
