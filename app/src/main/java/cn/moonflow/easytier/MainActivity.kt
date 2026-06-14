@@ -869,7 +869,7 @@ private fun ServersPage(
                                         value = server.name,
                                         placeholder = "名称",
                                         palette = palette,
-                                        onValueChange = { editable = editable.replaceAt(index, server.copy(name = it)) }
+                                        onValueChange = { val next = editable.replaceAt(index, server.copy(name = it)); editable = next; if (next[index].address.isNotBlank()) onSaveUserServers(next) }
                                     )
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                         QTextField(
@@ -877,20 +877,13 @@ private fun ServersPage(
                                             placeholder = "tcp://server.example.com:11010",
                                             palette = palette,
                                             modifier = Modifier.weight(1f),
-                                            onValueChange = { editable = editable.replaceAt(index, server.copy(address = it)) }
+                                            onValueChange = { val next = editable.replaceAt(index, server.copy(address = it)); editable = next; if (it.isNotBlank()) onSaveUserServers(next) }
                                         )
                                         IconButton(onClick = { pendingDeleteIndex = index }) {
                                             Icon(Icons.Rounded.Delete, null, tint = palette.error)
                                         }
                                     }
                                 }
-                            }
-                        }
-                        if (editable.isNotEmpty()) {
-                            Spacer(Modifier.height(4.dp))
-                            QButton("保存收藏", palette, Modifier.fillMaxWidth()) {
-                                val valid = editable.filter { it.address.isNotBlank() }
-                                onSaveUserServers(valid.distinctBy { it.address.lowercase() })
                             }
                         }
                     }
