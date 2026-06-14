@@ -992,7 +992,7 @@ private fun ConfigEditorScreenV2(
                 Spacer(Modifier.height(12.dp))
                 SmallLabel("配置名称", palette)
                 QTextField(cfg.label, "配置名称", palette) { cfg = cfg.copy(label = it) }
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(16.dp))
                 ActionBar(palette) {
                     QButton("保存", palette, Modifier.weight(1f), compact = true, icon = Icons.Rounded.Check) { onSave(cfg) }
                     QButton("不保存", palette, Modifier.weight(1f), primary = false, compact = true) { onBack() }
