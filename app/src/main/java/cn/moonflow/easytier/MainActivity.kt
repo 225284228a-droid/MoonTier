@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -725,7 +726,7 @@ private fun ProfilesPage(
         }
         items(configs, key = { it.id }) { cfg ->
             val runningHere = runtime.running && runtime.runningConfigId == cfg.id
-            QCard(palette) {
+            QCard(palette, modifier = Modifier.animateItemPlacement(tween(280))) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(cfg.displayName, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -791,7 +792,12 @@ private fun ServersPage(
                     Text("暂无收藏服务器", color = palette.subText, fontSize = 13.sp)
                 }
                 editable.forEachIndexed { index, server ->
-                    Column(Modifier.padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(
+                        Modifier
+                            .padding(vertical = 6.dp)
+                            .animateContentSize(tween(220)),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         QTextField(
                             value = server.name,
                             placeholder = "名称",
