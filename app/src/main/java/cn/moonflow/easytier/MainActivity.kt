@@ -444,7 +444,10 @@ private fun ApplySystemBars(palette: Palette, darkMode: Boolean) {
     val view = LocalView.current
     SideEffect {
         val window = (view.context as Activity).window
+        @Suppress("DEPRECATION")
+        // Keep explicit bar colors until the app is migrated to a full edge-to-edge layout.
         window.statusBarColor = palette.background.toArgbInt()
+        @Suppress("DEPRECATION")
         window.navigationBarColor = palette.background.toArgbInt()
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = if (darkMode) 0 else (
