@@ -106,6 +106,30 @@ class EasyTierController(
         }
     }
 
+    fun refreshOrphanInstances() {
+        if (!state.running && !state.starting && !state.stopping) {
+            scope.launch {
+                val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(8).orEmpty() }
+                val outer = runCatching { JSONObject(raw) }.getOrNull() ?: return@launch
+                val orphanNames = ArrayList<String>()
+                val keys = outer.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (outer.optJSONObject(key) != null) orphanNames.add(key)
+                }
+                if (orphanNames.isNotEmpty()) {
+                    val firstOrphan = orphanNames.first()
+                    val orphanConfig = NetworkConfig.defaultConfig(default = false).copy(
+                        instanceName = firstOrphan,
+                        label = firstOrphan
+                    )
+                    val toml = TomlCodec.build(orphanConfig)
+                    requestVpn(toml)
+                }
+            }
+        }
+    }
+
     fun onVpnPermissionDenied() {
         scope.launch {
             stopRuntime(

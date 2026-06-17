@@ -441,15 +441,16 @@ private fun MoonTierApp(
     LaunchedEffect(
         configServerSupported,
         settings.configServerAutoConnect,
-        settings.configServerUrl,
-        settings.configServerHostname,
-        settings.configServerMachineId,
-        settings.configServerSecureMode
+        controller.state.running
     ) {
         if (!configServerSupported) return@LaunchedEffect
         if (configServerAutoConnectTried) return@LaunchedEffect
         if (!settings.configServerAutoConnect) return@LaunchedEffect
         if (settings.configServerUrl.isBlank()) return@LaunchedEffect
+        if (controller.state.running) {
+            configServerAutoConnectTried = true
+            return@LaunchedEffect
+        }
         if (configServerConnected) {
             configServerAutoConnectTried = true
             return@LaunchedEffect
@@ -505,7 +506,10 @@ private fun MoonTierApp(
                         runtime = runtime,
                         userServers = userServers,
                         officialServers = officialServers,
-                        onStart = { controller.start(it) },
+                        onStart = {
+                            if (configServerConnected) disconnectConfigServer(showSuccessToast = false)
+                            controller.start(it)
+                        },
                         onStop = { controller.stop() },
                         onEdit = { editingConfig = it },
                         onNewConfig = {
@@ -1132,6 +1136,13 @@ private fun SettingsPage(
         item {
             QCard(palette) {
                 Text("\u914d\u7f6e\u670d\u52a1\u5668", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "\u672c\u5730\u5b9e\u4f8b\u4f18\u5148\u7ea7\u9ad8\u4e8e\u914d\u7f6e\u670d\u52a1\u5668\uff0c\u4e24\u8005\u4e0d\u80fd\u540c\u65f6\u8fd0\u884c\u3002\u542f\u52a8\u672c\u5730\u7f51\u7edc\u65f6\u4f1a\u81ea\u52a8\u65ad\u5f00\u914d\u7f6e\u670d\u52a1\u5668\u3002",
+                    color = palette.subText,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp
+                )
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     StatusDot(configServerStatusColor)
@@ -1172,7 +1183,7 @@ private fun SettingsPage(
                     fontSize = 12.sp,
                     lineHeight = 18.sp
                 )
-                SwitchRow("\u542f\u52a8\u65f6\u81ea\u52a8\u8fde\u63a5", settings.configServerAutoConnect, palette) {
+                SwitchRow("\u542f\u52a8\u65f6\u81ea\u52a8\u8fde\u63a5\uff08\u672c\u5730\u5b9e\u4f8b\u542f\u52a8\u65f6\u81ea\u52a8\u8df3\u8fc7\uff09", settings.configServerAutoConnect, palette) {
                     onSettings(settings.copy(configServerAutoConnect = it))
                 }
                 Spacer(Modifier.height(12.dp))
