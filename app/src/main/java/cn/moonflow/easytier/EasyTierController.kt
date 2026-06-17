@@ -201,6 +201,45 @@ class EasyTierController(
         }
     }
 
+    
+    private fun launchCheckConfigServerInstance(instanceName: String) {
+        scope.launch {
+            for (attempt in 1..15) {
+                delay(2000)
+                val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(8).orEmpty() }
+                val outer = runCatching { JSONObject(raw) }.getOrNull() ?: continue
+                val info = outer.optJSONObject(instanceName)
+                if (info != null) {
+                    val csConfig = NetworkConfig.defaultConfig(default = false).copy(
+                        instanceName = instanceName,
+                        label = "\u914d\u7f6e\u670d\u52a1\u5668: $instanceName"
+                    )
+                    runningConfig = csConfig
+                    directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(csConfig, store) }
+                    vpnSignature = ""
+                    lastLogKey = ""
+                    missedPolls = 0
+                    stalledPolls = 0
+                    state = state.copy(
+                        running = true,
+                        starting = false,
+                        runningConfigId = "",
+                        statusText = "\u914d\u7f6e\u670d\u52a1\u5668\u5b9e\u4f8b\u8fd0\u884c\u4e2d: $instanceName",
+                        logs = state.logs + "\u914d\u7f6e\u670d\u52a1\u5668\u5b9e\u4f8b\u5df2\u542f\u52a8: $instanceName"
+                    )
+                    configServerPendingInstance = null
+                    configServerPendingToml = null
+                    pollJob?.cancel()
+                    pollJob = scope.launch { pollLoop(csConfig) }
+                    return@launch
+                }
+            }
+            Log.w("MoonTierCtrl", "config server instance $instanceName not detected after VPN grant timeout")
+            configServerPendingInstance = null
+            configServerPendingToml = null
+        }
+    }
+
     fun refreshOrphanInstances() {
         if (!state.running && !state.starting && !state.stopping && configServerPendingInstance == null) {
             scope.launch {
@@ -231,6 +270,8 @@ class EasyTierController(
                             .put("routes", JSONArray())
                             .toString()
                         requestVpn(vpnJson)
+                // Schedule a delayed check for the instance after VPN is granted
+                launchCheckConfigServerInstance(instanceName)
                         break // Only request VPN for the first orphan per cycle
                     }
                 }
