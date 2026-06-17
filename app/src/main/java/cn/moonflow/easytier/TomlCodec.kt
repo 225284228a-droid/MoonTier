@@ -68,6 +68,11 @@ object TomlCodec {
             out += "[[proxy_network]]"
             out += "cidr = \"${esc(it)}\""
         }
+        val aclToml = config.aclToml.trim()
+        if (aclToml.isNotBlank()) {
+            out += ""
+            out += aclToml
+        }
         return out.joinToString("\n")
     }
 
@@ -78,6 +83,7 @@ object TomlCodec {
         val flags = LinkedHashMap<String, String>()
         val peers = ArrayList<String>()
         val proxyCidrs = ArrayList<String>()
+        val aclToml = extractAclToml(text)
 
         logicalLines(text).forEach { raw ->
             val line = raw.trim()
@@ -158,6 +164,7 @@ object TomlCodec {
             mtu = scalar(flags["mtu"].orEmpty()).toIntOrNull() ?: 0,
             defaultProtocol = scalar(flags["default_protocol"].orEmpty()).ifBlank { "tcp" },
             encryptionAlgorithm = scalar(flags["encryption_algorithm"].orEmpty()).ifBlank { "aes-gcm" },
+            aclToml = aclToml,
             isDefault = false
         )
     }
@@ -234,6 +241,35 @@ object TomlCodec {
         }
         if (current.isNotEmpty()) out += current.toString()
         return out
+    }
+
+    private fun extractAclToml(text: String): String {
+        val out = ArrayList<String>()
+        var capturing = false
+        text.lineSequence().forEach { raw ->
+            val trimmed = raw.trim()
+            if (isSectionHeader(trimmed)) {
+                capturing = isAclSectionHeader(trimmed)
+            }
+            if (capturing) out += raw.trimEnd()
+        }
+        return out
+            .dropWhile { it.isBlank() }
+            .dropLastWhile { it.isBlank() }
+            .joinToString("\n")
+    }
+
+    private fun isSectionHeader(line: String): Boolean =
+        (line.startsWith("[[") && line.endsWith("]]")) || (line.startsWith("[") && line.endsWith("]"))
+
+    private fun isAclSectionHeader(line: String): Boolean {
+        if (!isSectionHeader(line)) return false
+        val section = if (line.startsWith("[[")) {
+            line.removePrefix("[[").removeSuffix("]]").trim()
+        } else {
+            line.removePrefix("[").removeSuffix("]").trim()
+        }
+        return section.startsWith("acl", ignoreCase = true)
     }
 
     private fun stripComment(line: String): String {

@@ -52,6 +52,7 @@ data class NetworkConfig(
     val mtu: Int = 0,
     val defaultProtocol: String = "tcp",
     val encryptionAlgorithm: String = "aes-gcm",
+    val aclToml: String = "",
     val isDefault: Boolean = true
 ) {
     val displayName: String
@@ -105,6 +106,7 @@ data class NetworkConfig(
         .put("mtu", mtu)
         .put("default_protocol", defaultProtocol)
         .put("encryption_algorithm", encryptionAlgorithm)
+        .put("acl_toml", aclToml)
         .put("is_default", isDefault)
 
     companion object {
@@ -161,6 +163,7 @@ data class NetworkConfig(
             mtu = obj.optInt("mtu", 0),
             defaultProtocol = obj.optString("default_protocol", "tcp"),
             encryptionAlgorithm = obj.optString("encryption_algorithm", "aes-gcm"),
+            aclToml = obj.optString("acl_toml", ""),
             isDefault = obj.optBoolean("is_default", false)
         )
     }
@@ -201,18 +204,33 @@ fun nextServerNameFromNames(existingNames: Collection<String>, base: String = "E
 data class AppSettings(
     val autoSyncOfficialServers: Boolean = true,
     val exitNodeAutoRoutes: Boolean = false,
-    val darkMode: Boolean = false
+    val darkMode: Boolean = false,
+    val configServerUrl: String = "",
+    val configServerHostname: String = "",
+    val configServerMachineId: String = "",
+    val configServerSecureMode: Boolean = true,
+    val configServerAutoConnect: Boolean = false
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("auto_sync_official_servers", autoSyncOfficialServers)
         .put("exit_node_auto_routes", exitNodeAutoRoutes)
         .put("dark_mode", darkMode)
+        .put("config_server_url", configServerUrl)
+        .put("config_server_hostname", configServerHostname)
+        .put("config_server_machine_id", configServerMachineId)
+        .put("config_server_secure_mode", configServerSecureMode)
+        .put("config_server_auto_connect", configServerAutoConnect)
 
     companion object {
         fun fromJson(obj: JSONObject): AppSettings = AppSettings(
             autoSyncOfficialServers = obj.optBoolean("auto_sync_official_servers", true),
             exitNodeAutoRoutes = obj.optBoolean("exit_node_auto_routes", false),
-            darkMode = obj.optBoolean("dark_mode", false)
+            darkMode = obj.optBoolean("dark_mode", false),
+            configServerUrl = obj.optString("config_server_url", ""),
+            configServerHostname = obj.optString("config_server_hostname", ""),
+            configServerMachineId = obj.optString("config_server_machine_id", ""),
+            configServerSecureMode = obj.optBoolean("config_server_secure_mode", true),
+            configServerAutoConnect = obj.optBoolean("config_server_auto_connect", false)
         )
     }
 }

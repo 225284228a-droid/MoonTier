@@ -13,6 +13,10 @@ public final class NativeEasyTier {
     public static native int retainNetworkInstance(String[] instanceNames);
     public static native String collectNetworkInfos(int maxLength);
     public static native int setTunFd(String instanceName, int fd);
+    public static native int startConfigServerClient(String url, String hostname, String machineId, boolean secureMode);
+    public static native int stopConfigServerClient();
+    public static native int isConfigServerClientConnected();
+    public static native boolean hasConfigServerClient();
     public static native String getLastError();
 
     public static int stopAllInstances() {

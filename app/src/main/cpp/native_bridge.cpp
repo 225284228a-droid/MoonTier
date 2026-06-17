@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <algorithm>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -24,6 +25,23 @@ void free_string(const char *s);
 namespace {
 
 std::mutex ffiMutex;
+std::string bridgeError;
+
+using ConfigServerEventCallback = void (*)(const char *, void *);
+using StartConfigServerClientFn = int (*)(const char *, const char *, const char *, bool, ConfigServerEventCallback, void *);
+using StopConfigServerClientFn = int (*)();
+using IsConfigServerClientConnectedFn = int (*)();
+
+template <typename T>
+T resolveSymbol(const char *name)
+{
+    return reinterpret_cast<T>(dlsym(RTLD_DEFAULT, name));
+}
+
+void setBridgeError(const std::string &message)
+{
+    bridgeError = message;
+}
 
 std::string toString(JNIEnv *env, jstring value)
 {
@@ -158,14 +176,83 @@ Java_cn_moonflow_easytier_NativeEasyTier_setTunFd(JNIEnv *env, jclass, jstring i
     return set_tun_fd(name.c_str(), fd);
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_cn_moonflow_easytier_NativeEasyTier_startConfigServerClient(
+    JNIEnv *env,
+    jclass,
+    jstring url,
+    jstring hostname,
+    jstring machineId,
+    jboolean secureMode)
+{
+    const auto startClient = resolveSymbol<StartConfigServerClientFn>("start_config_server_client");
+    if (!startClient) {
+        std::lock_guard<std::mutex> lock(ffiMutex);
+        setBridgeError("current libeasytier_ffi.so does not export start_config_server_client");
+        return -1;
+    }
+
+    const std::string urlValue = toString(env, url);
+    const std::string hostnameValue = toString(env, hostname);
+    const std::string machineIdValue = toString(env, machineId);
+    const char *hostnamePtr = hostnameValue.empty() ? nullptr : hostnameValue.c_str();
+
+    std::lock_guard<std::mutex> lock(ffiMutex);
+    return startClient(
+        urlValue.c_str(),
+        hostnamePtr,
+        machineIdValue.c_str(),
+        secureMode == JNI_TRUE,
+        nullptr,
+        nullptr);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_cn_moonflow_easytier_NativeEasyTier_stopConfigServerClient(JNIEnv *, jclass)
+{
+    const auto stopClient = resolveSymbol<StopConfigServerClientFn>("stop_config_server_client");
+    if (!stopClient) {
+        std::lock_guard<std::mutex> lock(ffiMutex);
+        setBridgeError("current libeasytier_ffi.so does not export stop_config_server_client");
+        return -1;
+    }
+
+    std::lock_guard<std::mutex> lock(ffiMutex);
+    return stopClient();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_cn_moonflow_easytier_NativeEasyTier_isConfigServerClientConnected(JNIEnv *, jclass)
+{
+    const auto isConnected = resolveSymbol<IsConfigServerClientConnectedFn>("is_config_server_client_connected");
+    if (!isConnected)
+        return 0;
+
+    std::lock_guard<std::mutex> lock(ffiMutex);
+    return isConnected();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_cn_moonflow_easytier_NativeEasyTier_hasConfigServerClient(JNIEnv *, jclass)
+{
+    const bool available =
+        resolveSymbol<StartConfigServerClientFn>("start_config_server_client") &&
+        resolveSymbol<StopConfigServerClientFn>("stop_config_server_client") &&
+        resolveSymbol<IsConfigServerClientConnectedFn>("is_config_server_client_connected");
+    return available ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_getLastError(JNIEnv *env, jclass)
 {
     const char *error = nullptr;
     std::lock_guard<std::mutex> lock(ffiMutex);
     get_error_msg(&error);
-    if (!error)
-        return nullptr;
+    if (!error) {
+        if (bridgeError.empty())
+            return nullptr;
+        return env->NewStringUTF(bridgeError.c_str());
+    }
 
     jstring out = env->NewStringUTF(error);
     free_string(error);

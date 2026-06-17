@@ -90,9 +90,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -115,8 +113,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: ConfigStore
@@ -291,6 +292,10 @@ private fun MoonTierApp(
     var selectedTab by remember { mutableIntStateOf(0) }
     var editingConfig by remember { mutableStateOf<NetworkConfig?>(null) }
     var dialog by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var configServerSupported by remember { mutableStateOf(NativeEasyTier.hasConfigServerClient()) }
+    var configServerConnected by remember { mutableStateOf(false) }
+    var configServerBusy by remember { mutableStateOf(false) }
+    var configServerAutoConnectTried by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val palette = if (settings.darkMode) Palette.Dark else Palette.Light
     val runtime = controller.state
@@ -300,6 +305,97 @@ private fun MoonTierApp(
         userServers = store.loadUserServers()
         officialServers = store.loadOfficialServers()
         settings = store.loadSettings()
+    }
+
+    fun saveSettings(next: AppSettings) {
+        val normalized = normalizeConfigServerSettings(next, configServerSupported)
+        settings = normalized
+        store.saveSettings(normalized)
+    }
+
+    suspend fun refreshConfigServerConnectionState() {
+        configServerSupported = runCatching { NativeEasyTier.hasConfigServerClient() }.getOrDefault(false)
+        configServerConnected = if (!configServerSupported) {
+            false
+        } else {
+            withContext(Dispatchers.IO) {
+                runCatching { NativeEasyTier.isConfigServerClientConnected() != 0 }.getOrDefault(false)
+            }
+        }
+    }
+
+    fun connectConfigServer(showSuccessToast: Boolean) {
+        scope.launch {
+            val normalized = normalizeConfigServerSettings(settings, configServerSupported)
+            if (!configServerSupported) {
+                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u5f53\u524d libeasytier_ffi.so \u4e0d\u652f\u6301\u914d\u7f6e\u670d\u52a1\u5668\u63a5\u53e3\u3002"
+                return@launch
+            }
+            if (normalized.configServerUrl.isBlank()) {
+                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u8bf7\u5148\u586b\u5199\u670d\u52a1\u5668 URL\u3002"
+                return@launch
+            }
+            val resolvedConfigServerUrl = resolveConfigServerUrlForApp(normalized.configServerUrl)
+            if (resolvedConfigServerUrl.isBlank()) {
+                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u670d\u52a1\u5668 URL \u4e0d\u80fd\u4e3a\u7a7a\u3002"
+                return@launch
+            }
+            if (normalized != settings) saveSettings(normalized)
+
+            configServerBusy = true
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    NativeEasyTier.startConfigServerClient(
+                        resolvedConfigServerUrl,
+                        normalized.configServerHostname,
+                        normalized.configServerMachineId,
+                        normalized.configServerSecureMode
+                    )
+                }
+            }
+            configServerBusy = false
+
+            if (result.isFailure) {
+                val error = result.exceptionOrNull()
+                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to (error?.message ?: "\u8fde\u63a5\u5931\u8d25\u3002")
+            } else {
+                val code = result.getOrThrow()
+                refreshConfigServerConnectionState()
+                if (code != 0) {
+                    dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to (NativeEasyTier.getLastError().orEmpty().ifBlank { "\u8fde\u63a5\u5931\u8d25\u3002" })
+                } else if (showSuccessToast) {
+                    dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u5df2\u53d1\u8d77\u8fde\u63a5\u3002"
+                }
+            }
+        }
+    }
+
+    fun disconnectConfigServer(showSuccessToast: Boolean) {
+        scope.launch {
+            if (!configServerSupported) {
+                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u5f53\u524d libeasytier_ffi.so \u4e0d\u652f\u6301\u914d\u7f6e\u670d\u52a1\u5668\u63a5\u53e3\u3002"
+                return@launch
+            }
+
+            configServerBusy = true
+            val result = runCatching {
+                withContext(Dispatchers.IO) { NativeEasyTier.stopConfigServerClient() }
+            }
+            configServerBusy = false
+
+            if (result.isFailure) {
+                val error = result.exceptionOrNull()
+                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to (error?.message ?: "\u65ad\u5f00\u5931\u8d25\u3002")
+            } else {
+                val code = result.getOrThrow()
+                refreshConfigServerConnectionState()
+                if (code != 0) {
+                    dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to (NativeEasyTier.getLastError().orEmpty().ifBlank { "\u65ad\u5f00\u5931\u8d25\u3002" })
+                } else if (showSuccessToast) {
+                    dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u5df2\u65ad\u5f00\u8fde\u63a5\u3002"
+                }
+            }
+        }
     }
 
     LaunchedEffect(isForeground, nodesExpanded) {
@@ -323,6 +419,43 @@ private fun MoonTierApp(
             runCatching { store.syncOfficialServers() }
                 .onSuccess { officialServers = store.loadOfficialServers() }
         }
+    }
+
+    LaunchedEffect(Unit) {
+        val normalized = normalizeConfigServerSettings(settings, configServerSupported)
+        if (normalized != settings) saveSettings(normalized)
+        refreshConfigServerConnectionState()
+    }
+
+    LaunchedEffect(configServerSupported) {
+        if (!configServerSupported) {
+            configServerConnected = false
+            return@LaunchedEffect
+        }
+        while (isActive) {
+            refreshConfigServerConnectionState()
+            delay(1500)
+        }
+    }
+
+    LaunchedEffect(
+        configServerSupported,
+        settings.configServerAutoConnect,
+        settings.configServerUrl,
+        settings.configServerHostname,
+        settings.configServerMachineId,
+        settings.configServerSecureMode
+    ) {
+        if (!configServerSupported) return@LaunchedEffect
+        if (configServerAutoConnectTried) return@LaunchedEffect
+        if (!settings.configServerAutoConnect) return@LaunchedEffect
+        if (settings.configServerUrl.isBlank()) return@LaunchedEffect
+        if (configServerConnected) {
+            configServerAutoConnectTried = true
+            return@LaunchedEffect
+        }
+        configServerAutoConnectTried = true
+        connectConfigServer(showSuccessToast = false)
     }
 
     ApplySystemBars(palette, settings.darkMode)
@@ -349,7 +482,12 @@ private fun MoonTierApp(
                         officialServers = officialServers,
                         onBack = { editingConfig = null },
                         onSave = {
-                            store.saveConfig(it)
+                            if (it.id == editing.id) {
+                                store.saveConfig(it)
+                            } else {
+                                val current = store.loadConfigs().filterNot { cfg -> cfg.id == editing.id }
+                                store.saveConfigs(current + it)
+                            }
                             reloadAll()
                             editingConfig = null
                         },
@@ -398,8 +536,7 @@ private fun MoonTierApp(
                             dialog = "已添加" to server.address
                         },
                         onSettings = {
-                            settings = it
-                            store.saveSettings(it)
+                            saveSettings(it)
                         },
                         onSyncOfficial = {
                             scope.launch {
@@ -422,7 +559,12 @@ private fun MoonTierApp(
                                         dialog = "下载失败" to (it.message ?: "无法下载服务器列表")
                                     }
                             }
-                        }
+                        },
+                        configServerSupported = configServerSupported,
+                        configServerConnected = configServerConnected,
+                        configServerBusy = configServerBusy,
+                        onConnectConfigServer = { connectConfigServer(showSuccessToast = true) },
+                        onDisconnectConfigServer = { disconnectConfigServer(showSuccessToast = true) }
                     )
                 }
             }
@@ -481,7 +623,12 @@ private fun MainTabs(
     onAddOfficialServer: (ServerEntry) -> Unit,
     onSettings: (AppSettings) -> Unit,
     onSyncOfficial: () -> Unit,
-    onDownloadUsers: (String) -> Unit
+    onDownloadUsers: (String) -> Unit,
+    configServerSupported: Boolean,
+    configServerConnected: Boolean,
+    configServerBusy: Boolean,
+    onConnectConfigServer: () -> Unit,
+    onDisconnectConfigServer: () -> Unit
 ) {
     val tabs = remember {
         listOf(
@@ -525,7 +672,16 @@ private fun MainTabs(
                     0 -> NetworkPage(palette, configs, runtime, nodesExpanded, onNodesExpandedChange, onStart, onStop, onEdit)
                     1 -> ProfilesPage(palette, configs, runtime, onStart, onStop, onEdit, onNewConfig, onImportToml, onDeleteConfig, onDefaultConfig, onExportConfig)
                     2 -> ServersPage(palette, userServers, officialServers, onSaveUserServers, onAddOfficialServer, onDownloadUsers, onSyncOfficial)
-                    else -> SettingsPage(palette, settings, onSettings)
+                    else -> SettingsPage(
+                        palette = palette,
+                        settings = settings,
+                        configServerSupported = configServerSupported,
+                        configServerConnected = configServerConnected,
+                        configServerBusy = configServerBusy,
+                        onSettings = onSettings,
+                        onConnectConfigServer = onConnectConfigServer,
+                        onDisconnectConfigServer = onDisconnectConfigServer
+                    )
                 }
             }
         }
@@ -813,27 +969,9 @@ private fun ServersPage(
     onDownloadUsers: (String) -> Unit,
     onSyncOfficial: () -> Unit
 ) {
-    var nextEditableServerId by remember { mutableLongStateOf(0L) }
-    var editable by remember { mutableStateOf(userServers.map { EditableServerItem(nextEditableServerId++, it) }) }
     var favoriteOpen by remember { mutableStateOf(false) }
     var officialOpen by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf("") }
-    var pendingDeleteId by remember { mutableLongStateOf(-1L) }
-    var deletingId by remember { mutableLongStateOf(-1L) }
-
-    LaunchedEffect(userServers) {
-        editable = syncEditableServerItems(editable, userServers) { nextEditableServerId++ }
-    }
-
-    fun persist(next: List<EditableServerItem>) {
-        onSaveUserServers(next.toServerEntries())
-    }
-
-    fun updateServer(itemId: Long, transform: (ServerEntry) -> ServerEntry): ServerEntry {
-        val updated = transform(editable.first { it.id == itemId }.server)
-        editable = editable.replaceServerItem(itemId, updated)
-        return updated
-    }
 
     LazyColumn(
         modifier = Modifier
@@ -854,7 +992,7 @@ private fun ServersPage(
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text("用户收藏", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                        Text("${editable.size} 个服务器", color = palette.subText, fontSize = 12.sp)
+                        Text("${userServers.size} 个服务器", color = palette.subText, fontSize = 12.sp)
                     }
                     ExpandArrow(favoriteOpen, palette) { favoriteOpen = !favoriteOpen }
                 }
@@ -863,58 +1001,20 @@ private fun ServersPage(
                     enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(160)),
                     exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(120))
                 ) {
-                    Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        QButton("新增收藏", palette, Modifier.fillMaxWidth(), icon = Icons.Rounded.Add) {
-                            editable = editable + EditableServerItem(
-                                id = nextEditableServerId++,
-                                server = ServerEntry(nextServerName(editable.map { it.server }), "")
-                            )
-                        }
-                        if (editable.isEmpty()) {
-                            Text("暂无收藏服务器", color = palette.subText, fontSize = 13.sp)
-                        }
-                        editable.forEach { item ->
-                            key(item.id) {
-                                val server = item.server
-                            AnimatedVisibility(
-                                visible = item.id != deletingId,
-                                enter = expandVertically(animationSpec = tween(280)) + fadeIn(tween(200)),
-                                exit = shrinkVertically(animationSpec = tween(260)) + fadeOut(tween(180))
-                            ) {
-                                Column(
-                                    Modifier
-                                        .padding(vertical = 6.dp)
-                                        .animateContentSize(tween(220)),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    QTextField(
-                                        value = server.name,
-                                        placeholder = "名称",
-                                        palette = palette,
-                                        onValueChange = { name ->
-                                            val updated = updateServer(item.id) { it.copy(name = name) }
-                                            if (updated.address.isNotBlank()) persist(editable)
-                                        }
-                                    )
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        QTextField(
-                                            value = server.address,
-                                            placeholder = "tcp://server.example.com:11010",
-                                            palette = palette,
-                                            modifier = Modifier.weight(1f),
-                                            onValueChange = { address ->
-                                                val updated = updateServer(item.id) { it.copy(address = address) }
-                                                if (updated.address.isNotBlank()) persist(editable)
-                                            }
-                                        )
-                                        IconButton(onClick = { pendingDeleteId = item.id }) {
-                                            Icon(Icons.Rounded.Delete, null, tint = palette.error)
-                                        }
+                    Column(Modifier.padding(top = 12.dp)) {
+                        ListEditor(
+                            title = "收藏地址",
+                            values = userServers.map { it.address },
+                            placeholder = "tcp://server.example.com:11010",
+                            palette = palette,
+                            onValues = { values ->
+                                onSaveUserServers(
+                                    values.map { address ->
+                                        ServerEntry(serverNameFromAddress(address), address)
                                     }
-                                }
+                                )
                             }
-                            }
-                        }
+                        )
                     }
                 }
             }
@@ -982,45 +1082,30 @@ private fun ServersPage(
             }
         }
     }
-
-    editable.firstOrNull { it.id == pendingDeleteId }?.let { deleting ->
-        val server = deleting.server
-        AlertDialog(
-            onDismissRequest = { pendingDeleteId = -1L },
-            title = { Text("确认删除", color = palette.text, fontWeight = FontWeight.SemiBold) },
-            text = { Text("确定要删除收藏服务器「${server.name.ifBlank { server.address }}」吗？", color = palette.subText, lineHeight = 20.sp) },
-            confirmButton = {
-                QButton("删除", palette, compact = true, danger = true) {
-                    deletingId = deleting.id
-                    pendingDeleteId = -1L
-                }
-            },
-            dismissButton = {
-                QButton("取消", palette, primary = false, compact = true) { pendingDeleteId = -1L }
-            },
-            containerColor = palette.surface,
-            shape = RoundedCornerShape(22.dp)
-        )
-    }
-    LaunchedEffect(deletingId) {
-        if (deletingId >= 0L) {
-            delay(300)
-            val next = editable.filterNot { it.id == deletingId }
-            editable = next
-            persist(next)
-            deletingId = -1L
-        }
-    }
 }
-
 
 @Composable
 private fun SettingsPage(
     palette: Palette,
     settings: AppSettings,
-    onSettings: (AppSettings) -> Unit
+    configServerSupported: Boolean,
+    configServerConnected: Boolean,
+    configServerBusy: Boolean,
+    onSettings: (AppSettings) -> Unit,
+    onConnectConfigServer: () -> Unit,
+    onDisconnectConfigServer: () -> Unit
 ) {
     var disclaimer by remember { mutableStateOf(false) }
+    val configServerStatusText = when {
+        !configServerSupported -> "\u5f53\u524d\u5b98\u65b9\u5e93\u4e0d\u652f\u6301"
+        configServerConnected -> "\u5df2\u8fde\u63a5"
+        else -> "\u672a\u8fde\u63a5"
+    }
+    val configServerStatusColor = when {
+        !configServerSupported -> palette.subText
+        configServerConnected -> palette.success
+        else -> palette.error
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -1030,17 +1115,94 @@ private fun SettingsPage(
         contentPadding = PaddingValues(top = 14.dp, bottom = 26.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { Header("设置", "同步、路由和外观", palette) }
+        item { Header("\u8bbe\u7f6e", "\u5e94\u7528\u504f\u597d\u4e0e\u914d\u7f6e\u670d\u52a1\u5668", palette) }
         item {
             QCard(palette) {
-                SwitchRow("启动时同步公共服务器", settings.autoSyncOfficialServers, palette) {
+                SwitchRow("\u81ea\u52a8\u540c\u6b65\u5b98\u65b9\u670d\u52a1\u5668", settings.autoSyncOfficialServers, palette) {
                     onSettings(settings.copy(autoSyncOfficialServers = it))
                 }
-                SwitchRow("深色模式", settings.darkMode, palette) {
+                SwitchRow("\u6df1\u8272\u6a21\u5f0f", settings.darkMode, palette) {
                     onSettings(settings.copy(darkMode = it))
                 }
-                SwitchRow("出口节点自动配置路由表", settings.exitNodeAutoRoutes, palette) {
+                SwitchRow("\u81ea\u52a8\u4e0b\u53d1\u51fa\u53e3\u8282\u70b9\u8def\u7531", settings.exitNodeAutoRoutes, palette) {
                     if (it) disclaimer = true else onSettings(settings.copy(exitNodeAutoRoutes = false))
+                }
+            }
+        }
+        item {
+            QCard(palette) {
+                Text("\u914d\u7f6e\u670d\u52a1\u5668", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusDot(configServerStatusColor)
+                    Text(configServerStatusText, color = configServerStatusColor, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                }
+                Spacer(Modifier.height(14.dp))
+                FieldBlock("\u670d\u52a1\u5668 URL", palette) {
+                    QTextField(
+                        value = settings.configServerUrl,
+                        placeholder = "tcp://host:22020/token \u6216 \u76f4\u63a5\u586b\u7528\u6237\u540d",
+                        palette = palette,
+                        onValueChange = { onSettings(settings.copy(configServerUrl = it)) }
+                    )
+                }
+                FieldBlock("\u4e3b\u673a\u540d", palette) {
+                    QTextField(
+                        value = settings.configServerHostname,
+                        placeholder = "\u53ef\u9009\uff0c\u9ed8\u8ba4\u4f7f\u7528\u8bbe\u5907\u4e3b\u673a\u540d",
+                        palette = palette,
+                        onValueChange = { onSettings(settings.copy(configServerHostname = it)) }
+                    )
+                }
+                FieldBlock("\u673a\u5668 ID", palette) {
+                    QTextField(
+                        value = settings.configServerMachineId,
+                        placeholder = "\u7559\u7a7a\u65f6\u81ea\u52a8\u751f\u6210",
+                        palette = palette,
+                        onValueChange = { onSettings(settings.copy(configServerMachineId = it)) }
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                SwitchRow("\u4e0b\u53d1\u914d\u7f6e\u542f\u7528 Secure Mode", settings.configServerSecureMode, palette) {
+                    onSettings(settings.copy(configServerSecureMode = it))
+                }
+                Text(
+                    "\u8fd9\u4e2a\u5f00\u5173\u63a7\u5236\u914d\u7f6e\u670d\u52a1\u5668\u4e0b\u53d1\u7684 EasyTier \u5b9e\u4f8b\u662f\u5426\u542f\u7528 Secure Mode\uff0c\u4e0d\u662f URL \u4f20\u8f93\u5c42\u7684 TLS \u5f00\u5173\u3002",
+                    color = palette.subText,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp
+                )
+                SwitchRow("\u542f\u52a8\u65f6\u81ea\u52a8\u8fde\u63a5", settings.configServerAutoConnect, palette) {
+                    onSettings(settings.copy(configServerAutoConnect = it))
+                }
+                Spacer(Modifier.height(12.dp))
+                ActionBar(palette) {
+                    QButton(
+                        text = if (configServerBusy && !configServerConnected) "\u8fde\u63a5\u4e2d" else "\u8fde\u63a5",
+                        palette = palette,
+                        modifier = Modifier.weight(1f),
+                        compact = true,
+                        enabled = configServerSupported && !configServerBusy && settings.configServerUrl.isNotBlank(),
+                        onClick = onConnectConfigServer
+                    )
+                    QButton(
+                        text = if (configServerBusy && configServerConnected) "\u65ad\u5f00\u4e2d" else "\u65ad\u5f00",
+                        palette = palette,
+                        modifier = Modifier.weight(1f),
+                        primary = false,
+                        compact = true,
+                        enabled = configServerSupported && !configServerBusy && configServerConnected,
+                        onClick = onDisconnectConfigServer
+                    )
+                }
+                if (!configServerSupported) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "\u5f53\u524d\u8fd9\u4e2a libeasytier_ffi.so \u7248\u672c\u6ca1\u6709\u5bfc\u51fa\u914d\u7f6e\u670d\u52a1\u5668\u5ba2\u6237\u7aef\u63a5\u53e3\u3002",
+                        color = palette.subText,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
                 }
             }
         }
@@ -1050,18 +1212,18 @@ private fun SettingsPage(
         AlertDialog(
             onDismissRequest = { disclaimer = false },
             confirmButton = {
-                QButton("同意并开启", palette, compact = true) {
+                QButton("\u542f\u7528", palette, compact = true) {
                     onSettings(settings.copy(exitNodeAutoRoutes = true))
                     disclaimer = false
                 }
             },
             dismissButton = {
-                QButton("取消", palette, primary = false, compact = true) { disclaimer = false }
+                QButton("\u53d6\u6d88", palette, primary = false, compact = true) { disclaimer = false }
             },
-            title = { Text("免责声明", color = palette.text, fontWeight = FontWeight.SemiBold) },
+            title = { Text("\u51fa\u53e3\u8282\u70b9\u8def\u7531", color = palette.text, fontWeight = FontWeight.SemiBold) },
             text = {
                 Text(
-                    "该功能会在配置了出口节点时自动把公网 IPv4 路由指向 EasyTier 虚拟网卡。禁止使用该功能违法翻越防火墙；使用该功能必须遵守所在国家或地区的法律法规。",
+                    "\u542f\u7528\u540e\u4f1a\u901a\u8fc7 EasyTier \u5411 Android VPN \u4e0b\u53d1\u9ed8\u8ba4 IPv4 \u8def\u7531\u3002\u8bf7\u5728\u786e\u8ba4\u51fa\u53e3\u8282\u70b9\u53ef\u4fe1\u4e14\u7b26\u5408\u9884\u671f\u540e\u518d\u5f00\u542f\u3002",
                     color = palette.subText,
                     lineHeight = 20.sp
                 )
@@ -1083,13 +1245,51 @@ private fun ConfigEditorScreenV2(
     onExport: (NetworkConfig) -> Unit
 ) {
     var cfg by remember(initial.id) { mutableStateOf(initial) }
+    var rawTomlOpen by remember { mutableStateOf(false) }
+    var rawTomlText by remember(initial.id) { mutableStateOf(TomlCodec.build(initial)) }
+    var rawTomlDirty by remember(initial.id) { mutableStateOf(false) }
+    var editorError by remember { mutableStateOf<Pair<String, String>?>(null) }
     var passwordVisible by remember { mutableStateOf(false) }
     var serverOpen by remember { mutableStateOf(false) }
     var protocolOpen by remember { mutableStateOf(false) }
     var p2pOpen by remember { mutableStateOf(false) }
     var perfOpen by remember { mutableStateOf(false) }
     var serviceOpen by remember { mutableStateOf(false) }
+    var aclOpen by remember { mutableStateOf(false) }
     var serverPicker by remember { mutableStateOf<ServerPickerState?>(null) }
+
+    LaunchedEffect(cfg, rawTomlDirty) {
+        if (!rawTomlDirty) rawTomlText = TomlCodec.build(cfg)
+    }
+
+    fun parseRawTomlForEditor(): NetworkConfig? {
+        val parsed = runCatching { TomlCodec.parse(rawTomlText) }.getOrElse {
+            editorError = "\u539f\u59cb TOML \u89e3\u6790\u5931\u8d25" to (it.message ?: "\u65e0\u6cd5\u89e3\u6790\u5f53\u524d TOML\u3002")
+            return null
+        }
+        return parsed.copy(id = cfg.id, isDefault = cfg.isDefault)
+    }
+
+    fun saveCurrentConfig() {
+        val target = if (rawTomlDirty) parseRawTomlForEditor() else cfg
+        if (target != null) {
+            onSave(target)
+            rawTomlDirty = false
+        }
+    }
+
+    fun exportCurrentConfig() {
+        val target = if (rawTomlDirty) parseRawTomlForEditor() else cfg
+        if (target != null) {
+            onExport(target)
+        }
+    }
+
+    fun applyRawTomlToForm() {
+        val parsed = parseRawTomlForEditor() ?: return
+        cfg = parsed
+        rawTomlDirty = false
+    }
 
     BackHandler {
         onBack()
@@ -1261,6 +1461,57 @@ private fun ConfigEditorScreenV2(
                 }
             }
         }
+        item {
+            ExpandableQCard("ACL", aclOpen, { aclOpen = it }, palette) {
+                Text(
+                    "\u8fd9\u91cc\u76f4\u63a5\u7f16\u8f91 ACL \u7684\u539f\u59cb TOML\uff0c\u4fdd\u5b58\u65f6\u4f1a\u539f\u6837\u9644\u52a0\u5230\u914d\u7f6e\u540e\u9762\uff0c\u4ee5\u4fbf\u540e\u7eed\u8ddf\u8fdb\u5b98\u65b9 ACL \u5b57\u6bb5\u53d8\u66f4\u3002",
+                    color = palette.subText,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp
+                )
+                QTextField(
+                    value = cfg.aclToml,
+                    placeholder = "[acl]\ndefault_action = \"accept\"",
+                    palette = palette,
+                    modifier = Modifier.heightIn(min = 160.dp),
+                    singleLine = false,
+                    onValueChange = { cfg = cfg.copy(aclToml = it) }
+                )
+            }
+        }
+        item {
+            ExpandableQCard("\u539f\u59cb TOML", rawTomlOpen, { rawTomlOpen = it }, palette) {
+                Text(
+                    "\u53ef\u4ee5\u5728\u8fd9\u91cc\u76f4\u63a5\u7f16\u8f91\u6574\u4efd EasyTier TOML\u3002\u4fee\u6539\u540e\u5148\u70b9\u201c\u5e94\u7528\u5230\u8868\u5355\u201d\uff0c\u518d\u70b9\u4e0a\u65b9\u7684\u201c\u4fdd\u5b58\u201d\u3002",
+                    color = palette.subText,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp
+                )
+                QTextField(
+                    value = rawTomlText,
+                    placeholder = "instance_id = \"...\"",
+                    palette = palette,
+                    modifier = Modifier.heightIn(min = 220.dp),
+                    singleLine = false,
+                    onValueChange = {
+                        rawTomlText = it
+                        rawTomlDirty = true
+                    }
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    QButton("\u5e94\u7528\u5230\u8868\u5355", palette, Modifier.weight(1f), primary = false, compact = true) {
+                        applyRawTomlToForm()
+                    }
+                    QButton("\u7528\u8868\u5355\u8986\u76d6", palette, Modifier.weight(1f), primary = false, compact = true) {
+                        rawTomlText = TomlCodec.build(cfg)
+                        rawTomlDirty = false
+                    }
+                }
+            }
+        }
     }
 
     serverPicker?.let { picker ->
@@ -1273,6 +1524,19 @@ private fun ConfigEditorScreenV2(
                 cfg = cfg.copy(peerUrls = (cfg.peerUrls + selected.map { it.address }).cleanItems())
                 serverPicker = null
             }
+        )
+    }
+
+    editorError?.let { (title, body) ->
+        AlertDialog(
+            onDismissRequest = { editorError = null },
+            confirmButton = {
+                QButton("\u786e\u5b9a", palette, compact = true) { editorError = null }
+            },
+            title = { Text(title, color = palette.text, fontWeight = FontWeight.SemiBold) },
+            text = { Text(body, color = palette.subText, lineHeight = 20.sp) },
+            containerColor = palette.surface,
+            shape = RoundedCornerShape(22.dp)
         )
     }
 }
@@ -1626,7 +1890,7 @@ private fun QTextField(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(if (singleLine) 44.dp else 88.dp)
+            .heightIn(min = if (singleLine) 44.dp else 88.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(palette.surfaceVariant)
             .border(BorderStroke(if (focused) 1.2.dp else 0.7.dp, if (focused) palette.accent.copy(alpha = 0.82f) else palette.border), RoundedCornerShape(14.dp))
@@ -1886,28 +2150,30 @@ private fun FormLabel(text: String, palette: Palette) {
     Text(text, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 10.dp))
 }
 
-private data class EditableServerItem(
-    val id: Long,
-    val server: ServerEntry
-)
+private const val CUSTOM_CONFIG_SERVER_FALLBACK = "tcp://ethd.ruixuan.online:22020"
 
-private fun syncEditableServerItems(
-    current: List<EditableServerItem>,
-    incoming: List<ServerEntry>,
-    newId: () -> Long
-): List<EditableServerItem> {
-    val remaining = current.toMutableList()
-    return incoming.map { server ->
-        val matchIndex = remaining.indexOfFirst { it.server == server }
-        if (matchIndex >= 0) remaining.removeAt(matchIndex) else EditableServerItem(newId(), server)
+private fun normalizeConfigServerSettings(settings: AppSettings, supported: Boolean): AppSettings {
+    if (!supported) {
+        return settings.copy(
+            configServerUrl = settings.configServerUrl.trim(),
+            configServerHostname = settings.configServerHostname.trim(),
+            configServerMachineId = settings.configServerMachineId.trim()
+        )
     }
+    return settings.copy(
+        configServerUrl = settings.configServerUrl.trim(),
+        configServerHostname = settings.configServerHostname.trim(),
+        configServerMachineId = settings.configServerMachineId.trim().ifBlank { java.util.UUID.randomUUID().toString() }
+    )
 }
 
-private fun List<EditableServerItem>.replaceServerItem(id: Long, server: ServerEntry): List<EditableServerItem> =
-    map { item -> if (item.id == id) item.copy(server = server) else item }
+private fun resolveConfigServerUrlForApp(raw: String): String {
+    val trimmed = raw.trim()
+    if (trimmed.contains("://")) return trimmed
+    val token = java.net.URLEncoder.encode(trimmed, Charsets.UTF_8.name()).replace("+", "%20")
+    return "$CUSTOM_CONFIG_SERVER_FALLBACK/$token"
+}
 
-private fun List<EditableServerItem>.toServerEntries(): List<ServerEntry> =
-    map { it.server }
 
 private fun <T> List<T>.replaceAt(index: Int, value: T): List<T> =
     mapIndexed { i, old -> if (i == index) value else old }
