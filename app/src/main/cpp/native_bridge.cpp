@@ -26,6 +26,9 @@ namespace {
 
 std::mutex ffiMutex;
 std::string bridgeError;
+JavaVM *gJvm = nullptr;
+jclass gNativeEasyTierClass = nullptr;
+jmethodID gDispatchMethod = nullptr;
 
 using ConfigServerEventCallback = void (*)(const char *, void *);
 using StartConfigServerClientFn = int (*)(const char *, const char *, const char *, bool, ConfigServerEventCallback, void *);
@@ -77,7 +80,66 @@ std::string jsonEscape(const char *raw)
     return out;
 }
 
+// --- JNI callback dispatcher ---
+
+void configServerEventCallbackC(const char *eventJson, void * /*userData*/)
+{
+    if (!gJvm || !eventJson)
+        return;
+
+    JNIEnv *env = nullptr;
+    bool needDetach = false;
+    int getEnvStat = gJvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
+
+    if (getEnvStat == JNI_EDETACHED) {
+        if (gJvm->AttachCurrentThread(&env, nullptr) != JNI_OK)
+            return;
+        needDetach = true;
+    } else if (getEnvStat != JNI_OK || !env) {
+        return;
+    }
+
+    jclass cls = gNativeEasyTierClass;
+    jmethodID mid = gDispatchMethod;
+    if (cls && mid) {
+        jstring jEvent = env->NewStringUTF(eventJson);
+        if (jEvent) {
+            env->CallStaticVoidMethod(cls, mid, jEvent);
+            env->DeleteLocalRef(jEvent);
+        }
+    }
+
+    if (needDetach)
+        gJvm->DetachCurrentThread();
 }
+
+} // namespace
+
+// --- JNI_OnLoad ---
+
+extern "C" JNIEXPORT jint JNICALL
+JNI_OnLoad(JavaVM *vm, void * /*reserved*/)
+{
+    gJvm = vm;
+    JNIEnv *env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK)
+        return JNI_VERSION_1_6;
+
+    jclass localCls = env->FindClass("cn/moonflow/easytier/NativeEasyTier");
+    if (localCls) {
+        gNativeEasyTierClass = static_cast<jclass>(env->NewGlobalRef(localCls));
+        env->DeleteLocalRef(localCls);
+
+        gDispatchMethod = env->GetStaticMethodID(
+            gNativeEasyTierClass,
+            "dispatchConfigServerEvent",
+            "(Ljava/lang/String;)V");
+    }
+
+    return JNI_VERSION_1_6;
+}
+
+// --- parseConfig ---
 
 extern "C" JNIEXPORT jint JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_parseConfig(JNIEnv *env, jclass, jstring config)
@@ -86,6 +148,8 @@ Java_cn_moonflow_easytier_NativeEasyTier_parseConfig(JNIEnv *env, jclass, jstrin
     std::lock_guard<std::mutex> lock(ffiMutex);
     return parse_config(cfg.c_str());
 }
+
+// --- runNetworkInstance ---
 
 extern "C" JNIEXPORT jint JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_runNetworkInstance(JNIEnv *env, jclass, jstring config)
@@ -96,6 +160,8 @@ Java_cn_moonflow_easytier_NativeEasyTier_runNetworkInstance(JNIEnv *env, jclass,
     std::lock_guard<std::mutex> lock(ffiMutex);
     return run_network_instance(cfg.c_str());
 }
+
+// --- retainNetworkInstance ---
 
 extern "C" JNIEXPORT jint JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_retainNetworkInstance(JNIEnv *env, jclass, jobjectArray names)
@@ -127,6 +193,8 @@ Java_cn_moonflow_easytier_NativeEasyTier_retainNetworkInstance(JNIEnv *env, jcla
     std::lock_guard<std::mutex> lock(ffiMutex);
     return retain_network_instance(ptrs.data(), ptrs.size());
 }
+
+// --- collectNetworkInfos ---
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_collectNetworkInfos(JNIEnv *env, jclass, jint maxLength)
@@ -168,6 +236,8 @@ Java_cn_moonflow_easytier_NativeEasyTier_collectNetworkInfos(JNIEnv *env, jclass
     return toJString(env, json.str());
 }
 
+// --- setTunFd ---
+
 extern "C" JNIEXPORT jint JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_setTunFd(JNIEnv *env, jclass, jstring instanceName, jint fd)
 {
@@ -175,6 +245,8 @@ Java_cn_moonflow_easytier_NativeEasyTier_setTunFd(JNIEnv *env, jclass, jstring i
     std::lock_guard<std::mutex> lock(ffiMutex);
     return set_tun_fd(name.c_str(), fd);
 }
+
+// --- startConfigServerClient (with real callback) ---
 
 extern "C" JNIEXPORT jint JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_startConfigServerClient(
@@ -203,9 +275,11 @@ Java_cn_moonflow_easytier_NativeEasyTier_startConfigServerClient(
         hostnamePtr,
         machineIdValue.c_str(),
         secureMode == JNI_TRUE,
-        nullptr,
+        configServerEventCallbackC,
         nullptr);
 }
+
+// --- stopConfigServerClient ---
 
 extern "C" JNIEXPORT jint JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_stopConfigServerClient(JNIEnv *, jclass)
@@ -221,6 +295,8 @@ Java_cn_moonflow_easytier_NativeEasyTier_stopConfigServerClient(JNIEnv *, jclass
     return stopClient();
 }
 
+// --- isConfigServerClientConnected ---
+
 extern "C" JNIEXPORT jint JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_isConfigServerClientConnected(JNIEnv *, jclass)
 {
@@ -232,6 +308,8 @@ Java_cn_moonflow_easytier_NativeEasyTier_isConfigServerClientConnected(JNIEnv *,
     return isConnected();
 }
 
+// --- hasConfigServerClient ---
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_hasConfigServerClient(JNIEnv *, jclass)
 {
@@ -241,6 +319,8 @@ Java_cn_moonflow_easytier_NativeEasyTier_hasConfigServerClient(JNIEnv *, jclass)
         resolveSymbol<IsConfigServerClientConnectedFn>("is_config_server_client_connected");
     return available ? JNI_TRUE : JNI_FALSE;
 }
+
+// --- getLastError ---
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_getLastError(JNIEnv *env, jclass)
