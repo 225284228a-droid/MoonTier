@@ -29,84 +29,26 @@ class EasyTierController(
     private var pollJob: Job? = null
     private var runningConfig: NetworkConfig? = null
     private var vpnSignature = ""
+    private var directCoreIps = emptySet<String>()
     private var lastLogKey = ""
     private var missedPolls = 0
     private var stalledPolls = 0
     private val _pollIntervalMs = kotlinx.coroutines.flow.MutableStateFlow(30000L)
-    private var directPublicIps = emptySet<String>()
-    @Volatile
-    var configServerRunning: Boolean = false
-        private set
-    @Volatile
-    var configServerPending: Boolean = false
-        private set
-    @Volatile
-    private var configServerAttachedKey: String = ""
 
     var state by mutableStateOf(RuntimeState())
         private set
-
-    private val configServerCallback = NativeEasyTier.ConfigServerCallback { eventJson ->
-        val event = runCatching { JSONObject(eventJson) }.getOrNull() ?: return@ConfigServerCallback
-        val instanceName = event.optString("instance_name", event.optString("name", "")).trim()
-        if (instanceName.isBlank()) return@ConfigServerCallback
-        val runtimeConfig = extractConfigServerRuntimeConfig(event, instanceName)
-        val instanceKey = configServerInstanceKey(event, instanceName, runtimeConfig)
-
-        scope.launch {
-            if (!configServerRunning) return@launch
-
-            val shouldAttach = configServerPending || configServerAttachedKey != instanceKey || pollJob == null
-            if (shouldAttach) {
-                if (!EasyTierVpnService.tryAttachFd(instanceName)) return@launch
-                configServerPending = false
-                configServerAttachedKey = instanceKey
-            }
-
-            val changed = runningConfig != runtimeConfig || pollJob == null || vpnSignature.isEmpty()
-            if (changed) {
-                runningConfig = runtimeConfig
-                directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(runtimeConfig, store) }
-                vpnSignature = ""
-                lastLogKey = ""
-                missedPolls = 0
-                stalledPolls = 0
-                pollJob?.cancel()
-                pollJob = scope.launch { pollLoop() }
-            }
-
-            state = state.copy(
-                running = true,
-                starting = false,
-                stopping = false,
-                runningConfigId = runtimeConfig.id,
-                statusText = "配置服务器实例运行中: $instanceName",
-                logs = (state.logs + "配置服务器实例已挂载: $instanceName").takeLast(240)
-            )
-        }
-    }
-
-    init {
-        NativeEasyTier.setConfigServerCallback(configServerCallback)
-    }
 
     fun start(config: NetworkConfig) {
         if (state.starting || state.stopping) return
         state = state.copy(starting = true, statusText = "正在启动 ${config.displayName}")
         scope.launch {
             val previousConfigId = state.runningConfigId
-            if (configServerRunning) {
-                withContext(Dispatchers.IO) { NativeEasyTier.stopConfigServerClient() }
-                configServerRunning = false
-                configServerPending = false
-                configServerAttachedKey = ""
-            }
             if (state.running) stop(wait = true)
 
             val normalized = config
             val runtimeConfig = normalized.withRuntimeHostname(context)
             runningConfig = runtimeConfig
-            directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(runtimeConfig, store) }
+            directCoreIps = withContext(Dispatchers.IO) { collectDirectCoreIps(runtimeConfig) }
             vpnSignature = ""
             lastLogKey = ""
             missedPolls = 0
@@ -153,7 +95,7 @@ class EasyTierController(
             val outer = runCatching { JSONObject(raw) }.getOrNull() ?: return@launch
             val config = configs.firstOrNull { outer.optJSONObject(it.instanceName) != null } ?: return@launch
             runningConfig = config
-            directPublicIps = withContext(Dispatchers.IO) { directPublicIpsFor(config, store) }
+            directCoreIps = withContext(Dispatchers.IO) { collectDirectCoreIps(config) }
             vpnSignature = ""
             lastLogKey = ""
             missedPolls = 0
@@ -171,79 +113,11 @@ class EasyTierController(
 
     fun onVpnPermissionDenied() {
         scope.launch {
-            if (configServerRunning || configServerPending) {
-                withContext(Dispatchers.IO) { NativeEasyTier.stopConfigServerClient() }
-                configServerRunning = false
-                configServerPending = false
-                configServerAttachedKey = ""
-            }
             stopRuntime(
                 statusText = "VPN 授权已取消",
                 logMessage = "VPN 授权已取消，网络实例已停止",
                 wait = false
             )
-        }
-    }
-
-    fun connectConfigServer(
-        url: String,
-        hostname: String,
-        machineId: String,
-        secureMode: Boolean,
-        onResult: (Int, String?) -> Unit
-    ) {
-        scope.launch {
-            val resolvedUrl = resolveConfigServerUrl(url)
-            if (resolvedUrl.isBlank()) {
-                onResult(-1, "服务器 URL 不能为空。")
-                return@launch
-            }
-
-            val code = withContext(Dispatchers.IO) {
-                NativeEasyTier.startConfigServerClient(
-                    resolvedUrl,
-                    hostname.trim(),
-                    machineId.trim(),
-                    secureMode
-                )
-            }
-
-            if (code != 0) {
-                onResult(code, NativeEasyTier.getLastError().orEmpty().ifBlank { "连接失败。" })
-                return@launch
-            }
-            configServerRunning = true
-            configServerPending = true
-            configServerAttachedKey = ""
-
-            val vpnJson = JSONObject()
-                .put("instanceName", "")
-                .put("address", "10.0.0.2")
-                .put("prefixLength", 24)
-                .put("mtu", 1400)
-                .put("dns", "")
-                .put("routes", JSONArray())
-                .put("configServerMode", true)
-                .toString()
-
-            requestVpn(vpnJson)
-            onResult(0, null)
-        }
-    }
-
-    fun disconnectConfigServer(onResult: (Int, String?) -> Unit) {
-        scope.launch {
-            val code = withContext(Dispatchers.IO) {
-                NativeEasyTier.stopConfigServerClient()
-            }
-            if (code != 0) {
-                onResult(code, NativeEasyTier.getLastError().orEmpty().ifBlank { "断开失败。" })
-            } else {
-                configServerRunning = false
-                configServerPending = false
-                configServerAttachedKey = ""
-                onResult(0, null)
-            }
         }
     }
 
@@ -260,7 +134,6 @@ class EasyTierController(
 
     private suspend fun stopRuntime(statusText: String, logMessage: String, wait: Boolean) {
         val stoppedConfigId = state.runningConfigId.ifBlank { runningConfig?.id.orEmpty() }
-        val stoppedInstanceName = runningConfig?.instanceName.orEmpty()
         val poll = pollJob
         pollJob = null
         poll?.cancel()
@@ -273,201 +146,20 @@ class EasyTierController(
         withContext(NonCancellable) {
             runCatching {
                 withTimeout(3000L) {
-                    withContext(Dispatchers.IO) { retainOtherInstances(stoppedInstanceName) }
+                    withContext(Dispatchers.IO) { NativeEasyTier.stopAllInstances() }
                 }
             }
         }
         runningConfig = null
-        configServerAttachedKey = ""
         vpnSignature = ""
+        directCoreIps = emptySet()
         missedPolls = 0
         stalledPolls = 0
-        directPublicIps = emptySet()
         if (stoppedConfigId.isNotBlank()) {
             store.updateConfigRunningState(stoppedConfigId, false)
         }
         state = RuntimeState(statusText = statusText, logs = (state.logs + logMessage).takeLast(240))
         if (wait) delay(180)
-    }
-
-    private fun resolveConfigServerUrl(raw: String): String {
-        val trimmed = raw.trim()
-        if (trimmed.contains("://")) return trimmed
-        val token = java.net.URLEncoder.encode(trimmed, Charsets.UTF_8.name()).replace("+", "%20")
-        return "tcp://ethd.ruixuan.online:22020/$token"
-    }
-
-    private fun extractConfigServerRuntimeConfig(event: JSONObject, instanceName: String): NetworkConfig {
-        val candidate = extractConfigServerPayload(event, depth = 0)
-        if (candidate != null) {
-            return candidate.copy(
-                id = candidate.id.ifBlank { configServerCacheId(instanceName) },
-                instanceName = instanceName.ifBlank { candidate.instanceName },
-                isDefault = false
-            )
-        }
-
-        val hostname = event.optString("hostname").trim()
-        val networkName = event.optString("network_name").trim()
-        val networkSecret = event.optString("network_secret").trim()
-        val peerUrls = event.optJSONArray("servers")?.toStringList().orEmpty()
-            .ifEmpty { event.optJSONArray("peer_urls")?.toStringList().orEmpty() }
-        val stunServers = event.optJSONArray("stun_servers")?.toStringList().orEmpty()
-        val listenerUrls = event.optJSONArray("listeners")?.toStringList().orEmpty()
-            .ifEmpty { event.optJSONArray("listen_addresses")?.toStringList().orEmpty() }
-        val proxyCidrs = event.optJSONArray("proxy_networks")?.toStringList().orEmpty()
-        val routes = event.optJSONArray("routes")?.toStringList().orEmpty()
-            .ifEmpty { event.optJSONArray("custom_routes")?.toStringList().orEmpty() }
-        val exitNodes = event.optJSONArray("exit_nodes")?.toStringList().orEmpty()
-
-        return NetworkConfig(
-            id = configServerCacheId(instanceName),
-            label = event.optString("label").trim().ifBlank { networkName.ifBlank { instanceName.ifBlank { "配置服务器缓存" } } },
-            instanceName = instanceName.ifBlank { "MoonTier-ConfigServer" },
-            hostname = hostname,
-            networkName = networkName.ifBlank { "default" },
-            networkSecret = networkSecret,
-            peerUrls = peerUrls,
-            stunServers = stunServers,
-            listenerUrls = listenerUrls,
-            proxyCidrs = proxyCidrs,
-            enableManualRoutes = routes.isNotEmpty() || event.has("custom_routes"),
-            routes = routes,
-            exitNodes = exitNodes,
-            enableRelayNetworkWhitelist = event.optBoolean("foreign_network_whitelist_enabled", false),
-            relayNetworkWhitelist = event.optJSONArray("foreign_network_whitelist")?.toStringList().orEmpty(),
-            proxyForwardBySystem = event.optBoolean("system_forwarding", false),
-            enableExitNode = event.optBoolean("enable_exit_node", false),
-            enableMagicDns = event.optBoolean("accept_dns", false),
-            enablePrivateMode = event.optBoolean("private_mode", true),
-            enableEncryption = event.optBoolean("enable_encryption", true),
-            mtu = event.optInt("mtu", 0),
-            defaultProtocol = event.optString("default_protocol", "tcp"),
-            encryptionAlgorithm = event.optString("encryption_algorithm", "aes-gcm"),
-            aclToml = event.optString("acl_toml", ""),
-            isDefault = false
-        )
-    }
-
-    private fun configServerCacheId(instanceName: String): String =
-        "config-server:${instanceName.ifBlank { "default" }}"
-
-    private fun configServerInstanceKey(event: JSONObject, instanceName: String, runtimeConfig: NetworkConfig? = null): String {
-        val explicit = listOf(
-            event.optString("instance_id"),
-            event.optString("inst_id"),
-            event.optString("config_id"),
-            event.optString("configId")
-        ).firstOrNull { it.isNotBlank() }
-        if (!explicit.isNullOrBlank()) return explicit.trim()
-
-        val runtimeFingerprint = runtimeConfig?.toJson()?.toString().orEmpty()
-        if (runtimeFingerprint.isNotBlank()) {
-            return "${instanceName.ifBlank { "default" }}:${runtimeFingerprint.hashCode().toString(16)}"
-        }
-
-        val eventFingerprint = listOf(
-            event.optJSONObject("config")?.toString(),
-            event.optString("config"),
-            event.optString("cfg"),
-            event.optString("config_toml"),
-            event.optString("configToml")
-        ).firstOrNull { it?.isNotBlank() == true }.orEmpty()
-        if (eventFingerprint.isNotBlank()) {
-            return "${instanceName.ifBlank { "default" }}:${eventFingerprint.hashCode().toString(16)}"
-        }
-
-        return instanceName.ifBlank { "default" }
-    }
-
-    private fun extractConfigServerPayload(value: Any?, depth: Int): NetworkConfig? {
-        if (depth > 4 || value == null) return null
-        return when (value) {
-            is JSONObject -> {
-                parseConfigServerObject(value)?.let { return it }
-                val keys = listOf(
-                    "config",
-                    "cfg",
-                    "config_json",
-                    "configJson",
-                    "config_data",
-                    "configData",
-                    "config_toml",
-                    "configToml",
-                    "payload_json",
-                    "payloadJson",
-                    "payload"
-                )
-                for (key in keys) {
-                    val child = value.opt(key) ?: continue
-                    extractConfigServerPayload(child, depth + 1)?.let { return it }
-                }
-                null
-            }
-            is JSONArray -> {
-                for (i in 0 until value.length()) {
-                    extractConfigServerPayload(value.opt(i), depth + 1)?.let { return it }
-                }
-                null
-            }
-            is String -> {
-                val text = value.trim()
-                when {
-                    text.isBlank() -> null
-                    text.startsWith("{") -> runCatching { JSONObject(text) }.getOrNull()
-                        ?.let { extractConfigServerPayload(it, depth + 1) }
-                    text.startsWith("[") -> runCatching { JSONArray(text) }.getOrNull()
-                        ?.let { extractConfigServerPayload(it, depth + 1) }
-                    else -> runCatching { TomlCodec.parse(text) }.getOrNull()
-                }
-            }
-            else -> null
-        }
-    }
-
-    private fun parseConfigServerObject(obj: JSONObject): NetworkConfig? {
-        val hasConfigFields = obj.has("network_name") || obj.has("network_secret") || obj.has("exit_nodes") || obj.has("proxy_networks") || obj.has("servers") || obj.has("peer_urls") || obj.has("stun_servers") || obj.has("listeners") || obj.has("listen_addresses") || obj.has("acl_toml") || obj.has("hostname") || obj.has("config_id") || obj.has("instance_id") || obj.has("custom_routes") || obj.has("routes")
-        if (!hasConfigFields) return null
-
-        val instanceName = obj.optString("instance_name", obj.optString("name", "")).trim()
-        val networkName = obj.optString("network_name").trim()
-        val hostname = obj.optString("hostname").trim()
-        val peerUrls = obj.optJSONArray("servers")?.toStringList().orEmpty()
-            .ifEmpty { obj.optJSONArray("peer_urls")?.toStringList().orEmpty() }
-        val stunServers = obj.optJSONArray("stun_servers")?.toStringList().orEmpty()
-        val listenerUrls = obj.optJSONArray("listeners")?.toStringList().orEmpty()
-            .ifEmpty { obj.optJSONArray("listen_addresses")?.toStringList().orEmpty() }
-        val proxyCidrs = obj.optJSONArray("proxy_networks")?.toStringList().orEmpty()
-        val routes = obj.optJSONArray("routes")?.toStringList().orEmpty()
-            .ifEmpty { obj.optJSONArray("custom_routes")?.toStringList().orEmpty() }
-        val exitNodes = obj.optJSONArray("exit_nodes")?.toStringList().orEmpty()
-        return NetworkConfig(
-            id = obj.optString("config_id", obj.optString("instance_id", "")).trim(),
-            label = obj.optString("label").trim().ifBlank { networkName.ifBlank { instanceName.ifBlank { "配置服务器缓存" } } },
-            instanceName = instanceName.ifBlank { "MoonTier-ConfigServer" },
-            hostname = hostname,
-            networkName = networkName.ifBlank { "default" },
-            networkSecret = obj.optString("network_secret").trim(),
-            peerUrls = peerUrls,
-            stunServers = stunServers,
-            listenerUrls = listenerUrls,
-            proxyCidrs = proxyCidrs,
-            enableManualRoutes = routes.isNotEmpty() || obj.has("custom_routes"),
-            routes = routes,
-            exitNodes = exitNodes,
-            enableRelayNetworkWhitelist = obj.optBoolean("foreign_network_whitelist_enabled", false),
-            relayNetworkWhitelist = obj.optJSONArray("foreign_network_whitelist")?.toStringList().orEmpty(),
-            proxyForwardBySystem = obj.optBoolean("system_forwarding", false),
-            enableExitNode = obj.optBoolean("enable_exit_node", false),
-            enableMagicDns = obj.optBoolean("accept_dns", false),
-            enablePrivateMode = obj.optBoolean("private_mode", true),
-            enableEncryption = obj.optBoolean("enable_encryption", true),
-            mtu = obj.optInt("mtu", 0),
-            defaultProtocol = obj.optString("default_protocol", "tcp"),
-            encryptionAlgorithm = obj.optString("encryption_algorithm", "aes-gcm"),
-            aclToml = obj.optString("acl_toml", ""),
-            isDefault = false
-        )
     }
 
     fun release() {
@@ -480,6 +172,7 @@ class EasyTierController(
         pollJob = null
         runningConfig = null
         vpnSignature = ""
+        directCoreIps = emptySet()
         missedPolls = 0
         stalledPolls = 0
         if (configId.isNotBlank()) {
@@ -501,57 +194,18 @@ class EasyTierController(
     private suspend fun pollOnce(config: NetworkConfig) {
         val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(8).orEmpty() }
         if (raw.isBlank()) {
-            if (configServerRunning) {
-                configServerPending = true
-                configServerAttachedKey = ""
-                missedPolls = 0
-                state = state.copy(
-                    running = true,
-                    starting = false,
-                    stopping = false,
-                    statusText = "等待配置服务器下发新配置",
-                    logs = (state.logs + "配置服务器等待新配置").takeLast(240)
-                )
-            } else {
-                convergeMissingInstance("状态读取为空，网络实例可能已退出")
-            }
+            convergeMissingInstance("状态读取为空，网络实例可能已退出")
             return
         }
 
         val outer = runCatching { JSONObject(raw) }.getOrNull()
         if (outer == null) {
-            if (configServerRunning) {
-                configServerPending = true
-                configServerAttachedKey = ""
-                missedPolls = 0
-                state = state.copy(
-                    running = true,
-                    starting = false,
-                    stopping = false,
-                    statusText = "等待配置服务器下发新配置",
-                    logs = (state.logs + "配置服务器状态解析失败，等待新配置").takeLast(240)
-                )
-            } else {
-                convergeMissingInstance("状态 JSON 解析失败，网络实例可能已退出")
-            }
+            convergeMissingInstance("状态 JSON 解析失败，网络实例可能已退出")
             return
         }
         val info = outer.optJSONObject(config.instanceName) ?: firstJsonObject(outer)
         if (info == null) {
-            if (configServerRunning) {
-                configServerPending = true
-                configServerAttachedKey = ""
-                missedPolls = 0
-                state = state.copy(
-                    running = true,
-                    starting = false,
-                    stopping = false,
-                    statusText = "等待配置服务器下发新配置",
-                    logs = (state.logs + "当前实例已结束，等待配置服务器新配置").takeLast(240)
-                )
-            } else {
-                convergeMissingInstance("未找到运行实例，网络实例已退出")
-            }
+            convergeMissingInstance("未找到运行实例，网络实例已退出")
             return
         }
         missedPolls = 0
@@ -575,17 +229,7 @@ class EasyTierController(
         if (state.running && localCidr.isBlank() && nodes.isEmpty()) {
             stalledPolls++
             if (stalledPolls >= 3) {
-                if (configServerRunning) {
-                    stalledPolls = 0
-                    configServerPending = true
-                    configServerAttachedKey = ""
-                    state = state.copy(
-                        statusText = "等待配置服务器下发新配置",
-                        logs = (state.logs + "配置服务器实例已结束，等待新配置").takeLast(240)
-                    )
-                } else {
-                    convergeMissingInstance("网络实例无响应")
-                }
+                convergeMissingInstance("网络实例无响应")
                 return
             }
         } else {
@@ -593,25 +237,20 @@ class EasyTierController(
         }
 
         if (localCidr.isNotBlank() && !config.noTun) {
+            if (directCoreIps.isEmpty()) {
+                directCoreIps = withContext(Dispatchers.IO) { collectDirectCoreIps(config) }
+            }
             val settings = store.loadSettings()
             val configuredExitNodes = config.exitNodes.cleanItems()
-            val reachableExitNodes = configuredExitNodes.filter { it in collectRouteIps(info) }
+            val reachableExitNodes = configuredExitNodes.filter {
+                normalizeExitNode(it) in collectRouteIps(info)
+            }
             val exitNodeRoutesActive = settings.exitNodeAutoRoutes && reachableExitNodes.isNotEmpty()
-            val runtimeText = (state.logs + logs + state.statusText).joinToString("\n")
-            val nextDirectPublicIps = if (exitNodeRoutesActive) {
-                collectDirectPublicIpsForExitRoutes(config, store, runtimeText)
-            } else {
-                directPublicIpsFor(config, store)
-            }
-            if (nextDirectPublicIps != directPublicIps) {
-                directPublicIps = nextDirectPublicIps
-                vpnSignature = ""
-            }
             val vpnJson = buildVpnConfigJson(
                 config = config,
                 cidr = localCidr,
                 peerProxyCidrs = proxyCidrs,
-                directPublicIps = nextDirectPublicIps,
+                directCoreIps = directCoreIps,
                 exitNodeAutoRoutes = exitNodeRoutesActive,
                 exitNodeConfiguredCount = configuredExitNodes.size,
                 exitNodeReachableCount = reachableExitNodes.size
@@ -634,20 +273,6 @@ class EasyTierController(
     }
 
     private suspend fun convergeMissingInstance(message: String) {
-        if (configServerRunning) {
-            configServerPending = true
-            configServerAttachedKey = ""
-            missedPolls = 0
-            stalledPolls = 0
-            state = state.copy(
-                running = true,
-                starting = false,
-                stopping = false,
-                statusText = "等待配置服务器下发新配置",
-                logs = (state.logs + message).takeLast(240)
-            )
-            return
-        }
         missedPolls += 1
         if (missedPolls < 2) return
         val stoppedConfig = runningConfig
@@ -655,9 +280,9 @@ class EasyTierController(
         pollJob = null
         runningConfig = null
         vpnSignature = ""
+        directCoreIps = emptySet()
         missedPolls = 0
         stalledPolls = 0
-        directPublicIps = emptySet()
         // 停止 VPN 服务
         val stopIntent = Intent(context, EasyTierVpnService::class.java)
             .setAction(EasyTierVpnService.ACTION_STOP)
@@ -669,7 +294,7 @@ class EasyTierController(
         withContext(NonCancellable) {
             runCatching {
                 withTimeout(3000L) {
-                    withContext(Dispatchers.IO) { retainOtherInstances(stoppedConfig?.instanceName.orEmpty()) }
+                    withContext(Dispatchers.IO) { NativeEasyTier.stopAllInstances() }
                 }
             }
         }
@@ -679,32 +304,6 @@ class EasyTierController(
         state = RuntimeState(statusText = "实例已退出", logs = (state.logs + message).takeLast(240))
     }
 
-    private fun retainOtherInstances(excludedInstanceName: String) {
-        if (excludedInstanceName.isBlank()) {
-            NativeEasyTier.stopAllInstances()
-            return
-        }
-        val raw = NativeEasyTier.collectNetworkInfos(16).orEmpty()
-        val outer = runCatching { JSONObject(raw) }.getOrNull()
-        if (outer == null) {
-            NativeEasyTier.stopAllInstances()
-            return
-        }
-        val retain = ArrayList<String>()
-        val keys = outer.keys()
-        while (keys.hasNext()) {
-            val name = keys.next()
-            if (name != excludedInstanceName && outer.optJSONObject(name) != null) {
-                retain += name
-            }
-        }
-        if (retain.isEmpty()) {
-            NativeEasyTier.stopAllInstances()
-        } else {
-            NativeEasyTier.retainNetworkInstance(retain.toTypedArray())
-        }
-    }
-
     private fun firstJsonObject(obj: JSONObject): JSONObject? {
         val keys = obj.keys()
         while (keys.hasNext()) {
@@ -712,6 +311,23 @@ class EasyTierController(
             if (value is JSONObject) return value
         }
         return null
+    }
+
+    private fun normalizeExitNode(value: String): String =
+        value.trim().substringBefore("/")
+
+    private fun collectDirectCoreIps(config: NetworkConfig): Set<String> {
+        val out = LinkedHashSet<String>()
+        (config.peerUrls + config.stunServers).forEach { url ->
+            val host = Ipv4.hostFromUrl(url)
+            if (host.isBlank()) return@forEach
+            if (Ipv4.parseAddress(host) != null) {
+                out += host
+            } else {
+                out += store.resolveHostIps(host).filter { Ipv4.parseAddress(it) != null }
+            }
+        }
+        return out.take(32).toSet()
     }
 
     private fun collectRouteIps(info: JSONObject): Set<String> {

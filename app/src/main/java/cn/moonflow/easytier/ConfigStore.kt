@@ -103,11 +103,8 @@ class ConfigStore(private val context: Context) {
             autoSyncOfficialServers = settings.autoSyncOfficialServers,
             exitNodeAutoRoutes = settings.exitNodeAutoRoutes,
             darkMode = settings.darkMode,
-            configServerUrl = settings.configServerUrl,
-            configServerHostname = settings.configServerHostname,
-            configServerMachineId = settings.configServerMachineId,
-            configServerSecureMode = settings.configServerSecureMode,
-            configServerAutoConnect = settings.configServerAutoConnect
+            rootModeEnabled = settings.rootModeEnabled,
+            coreAutoUpdate = settings.coreAutoUpdate
         )
         writeTextAtomic(settingsFile, merged.toJson().toString(2))
     }
@@ -363,10 +360,9 @@ class ConfigStore(private val context: Context) {
         return connection.inputStream.bufferedReader().use { it.readText() }
     }
 
-    fun resolvePublicIpv4(host: String): List<String> = runCatching {
+    fun resolveHostIps(host: String): List<String> = runCatching {
         InetAddress.getAllByName(host)
             .mapNotNull { it.hostAddress }
-            .filter { Ipv4.isPublicIpv4(it) }
             .distinct()
     }.getOrDefault(emptyList())
 }

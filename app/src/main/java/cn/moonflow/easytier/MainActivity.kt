@@ -66,9 +66,12 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Storage
@@ -123,6 +126,7 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     private lateinit var store: ConfigStore
     private lateinit var controller: EasyTierController
+    private lateinit var rootController: RootTierController
     private var pendingVpnConfig: String? = null
     private var pendingExportText: String = ""
     private var onImportedConfig: ((NetworkConfig) -> Unit)? = null
@@ -174,6 +178,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         store = ConfigStore(applicationContext)
         controller = EasyTierController(applicationContext, store, ::requestVpn)
+        rootController = RootTierController(applicationContext)
 
         window.attributes = window.attributes.apply { preferredRefreshRate = 120f }
 
@@ -183,6 +188,7 @@ class MainActivity : ComponentActivity() {
                 isForeground = isForeground,
                 store = store,
                 controller = controller,
+                rootController = rootController,
                 importToml = { importTomlLauncher.launch(arrayOf("text/*", "application/toml", "application/octet-stream")) },
                 exportToml = { config ->
                     pendingExportText = TomlCodec.build(config)
@@ -203,6 +209,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         controller.release()
+        rootController.release()
         super.onDestroy()
     }
 
@@ -281,11 +288,11 @@ private fun MoonTierApp(
     isForeground: Boolean,
     store: ConfigStore,
     controller: EasyTierController,
+    rootController: RootTierController,
     importToml: () -> Unit,
     exportToml: (NetworkConfig) -> Unit,
     bindImportHandler: (((NetworkConfig) -> Unit, (String, String) -> Unit) -> Unit)
 ) {
-    val androidContext = LocalContext.current
     var settings by remember { mutableStateOf(store.loadSettings()) }
     var nodesExpanded by remember { mutableStateOf(false) }
     var configs by remember { mutableStateOf(store.loadConfigs()) }
@@ -294,10 +301,7 @@ private fun MoonTierApp(
     var selectedTab by remember { mutableIntStateOf(0) }
     var editingConfig by remember { mutableStateOf<NetworkConfig?>(null) }
     var dialog by remember { mutableStateOf<Pair<String, String>?>(null) }
-    var configServerSupported by remember { mutableStateOf(NativeEasyTier.hasConfigServerClient()) }
-    var configServerConnected by remember { mutableStateOf(false) }
-    var configServerBusy by remember { mutableStateOf(false) }
-    var configServerAutoConnectTried by remember { mutableStateOf(false) }
+    var rootAvailable by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val palette = if (settings.darkMode) Palette.Dark else Palette.Light
     val runtime = controller.state
@@ -310,97 +314,21 @@ private fun MoonTierApp(
     }
 
     fun saveSettings(next: AppSettings) {
-        val normalized = normalizeConfigServerSettings(next, configServerSupported)
-        settings = normalized
-        store.saveSettings(normalized)
-    }
-
-    suspend fun refreshConfigServerConnectionState() {
-        configServerSupported = runCatching { NativeEasyTier.hasConfigServerClient() }.getOrDefault(false)
-        configServerConnected = if (!configServerSupported) {
-            false
-        } else {
-            withContext(Dispatchers.IO) {
-                runCatching { NativeEasyTier.isConfigServerClientConnected() != 0 }.getOrDefault(false)
+        if (next.rootModeEnabled != settings.rootModeEnabled) {
+            if (next.rootModeEnabled) {
+                controller.stop()
+            } else {
+                rootController.stopAll()
             }
         }
+        settings = next
+        store.saveSettings(next)
     }
 
-    fun connectConfigServer(showSuccessToast: Boolean) {
+    fun refreshRootStatus() {
         scope.launch {
-            val normalized = normalizeConfigServerSettings(settings, configServerSupported)
-            if (!configServerSupported) {
-                dialog = "配置服务器" to "当前 libeasytier_ffi.so 不支持配置服务器接口。"
-                return@launch
-            }
-            if (normalized.configServerUrl.isBlank()) {
-                dialog = "配置服务器" to "请先填写服务器 URL。"
-                return@launch
-            }
-            val resolvedConfigServerUrl = resolveConfigServerUrlForApp(normalized.configServerUrl)
-            if (resolvedConfigServerUrl.isBlank()) {
-                dialog = "配置服务器" to "服务器 URL 不能为空。"
-                return@launch
-            }
-            if (normalized != settings) saveSettings(normalized)
-
-            val hostname = normalized.configServerHostname.trim()
-            val machineId = normalized.configServerMachineId.trim()
-            val useSystemDefaults = hostname.isBlank() && machineId.isBlank()
-            val effectiveHostname = if (useSystemDefaults) {
-                Build.MODEL.trim().ifBlank { "Android" }
-            } else {
-                hostname
-            }
-            val effectiveMachineId = if (useSystemDefaults) {
-                android.provider.Settings.Secure.getString(
-                    androidContext.contentResolver,
-                    android.provider.Settings.Secure.ANDROID_ID
-                ).orEmpty()
-                    .trim()
-                    .ifBlank { java.util.UUID.randomUUID().toString() }
-            } else {
-                machineId
-            }
-
-            configServerBusy = true
-            controller.connectConfigServer(
-                url = resolvedConfigServerUrl,
-                hostname = effectiveHostname,
-                machineId = effectiveMachineId,
-                secureMode = normalized.configServerSecureMode
-            ) { code, message ->
-                scope.launch {
-                    configServerBusy = false
-                    refreshConfigServerConnectionState()
-                    if (code != 0) {
-                        dialog = "配置服务器" to (message ?: "连接失败。")
-                    } else if (showSuccessToast) {
-                        dialog = "配置服务器" to "已发起连接。"
-                    }
-                }
-            }
-        }
-    }
-
-    fun disconnectConfigServer(showSuccessToast: Boolean) {
-        scope.launch {
-            if (!configServerSupported) {
-                dialog = "配置服务器" to "当前 libeasytier_ffi.so 不支持配置服务器接口。"
-                return@launch
-            }
-
-            configServerBusy = true
-            controller.disconnectConfigServer { code, message ->
-                scope.launch {
-                    configServerBusy = false
-                    refreshConfigServerConnectionState()
-                    if (code != 0) {
-                        dialog = "配置服务器" to (message ?: "断开失败。")
-                    } else if (showSuccessToast) {
-                        dialog = "配置服务器" to "已断开连接。"
-                    }
-                }
+            rootAvailable = withContext(Dispatchers.IO) {
+                RootManager.probe(refresh = true).available
             }
         }
     }
@@ -429,40 +357,9 @@ private fun MoonTierApp(
     }
 
     LaunchedEffect(Unit) {
-        val normalized = normalizeConfigServerSettings(settings, configServerSupported)
-        if (normalized != settings) saveSettings(normalized)
-        refreshConfigServerConnectionState()
-    }
-
-    LaunchedEffect(configServerSupported) {
-        if (!configServerSupported) {
-            configServerConnected = false
-            return@LaunchedEffect
+        rootAvailable = withContext(Dispatchers.IO) {
+            RootManager.probe().available
         }
-        while (isActive) {
-            refreshConfigServerConnectionState()
-            delay(1500)
-        }
-    }
-
-    LaunchedEffect(
-        configServerSupported,
-        settings.configServerAutoConnect,
-        settings.configServerUrl,
-        settings.configServerHostname,
-        settings.configServerMachineId,
-        settings.configServerSecureMode
-    ) {
-        if (!configServerSupported) return@LaunchedEffect
-        if (configServerAutoConnectTried) return@LaunchedEffect
-        if (!settings.configServerAutoConnect) return@LaunchedEffect
-        if (settings.configServerUrl.isBlank()) return@LaunchedEffect
-        if (configServerConnected) {
-            configServerAutoConnectTried = true
-            return@LaunchedEffect
-        }
-        configServerAutoConnectTried = true
-        connectConfigServer(showSuccessToast = false)
     }
 
     ApplySystemBars(palette, settings.darkMode)
@@ -510,6 +407,10 @@ private fun MoonTierApp(
                         configs = configs,
                         settings = settings,
                         runtime = runtime,
+                        rootController = rootController,
+                        rootAvailable = rootAvailable,
+                        rootMode = settings.rootModeEnabled,
+                        onRefreshRoot = ::refreshRootStatus,
                         userServers = userServers,
                         officialServers = officialServers,
                         onStart = { controller.start(it) },
@@ -567,11 +468,6 @@ private fun MoonTierApp(
                                     }
                             }
                         },
-                        configServerSupported = configServerSupported,
-                        configServerConnected = configServerConnected,
-                        configServerBusy = configServerBusy,
-                        onConnectConfigServer = { connectConfigServer(showSuccessToast = true) },
-                        onDisconnectConfigServer = { disconnectConfigServer(showSuccessToast = true) }
                     )
                 }
             }
@@ -616,6 +512,10 @@ private fun MainTabs(
     configs: List<NetworkConfig>,
     settings: AppSettings,
     runtime: RuntimeState,
+    rootController: RootTierController,
+    rootAvailable: Boolean,
+    rootMode: Boolean,
+    onRefreshRoot: () -> Unit,
     userServers: List<ServerEntry>,
     officialServers: List<ServerEntry>,
     onStart: (NetworkConfig) -> Unit,
@@ -630,12 +530,7 @@ private fun MainTabs(
     onAddOfficialServer: (ServerEntry) -> Unit,
     onSettings: (AppSettings) -> Unit,
     onSyncOfficial: () -> Unit,
-    onDownloadUsers: (String) -> Unit,
-    configServerSupported: Boolean,
-    configServerConnected: Boolean,
-    configServerBusy: Boolean,
-    onConnectConfigServer: () -> Unit,
-    onDisconnectConfigServer: () -> Unit
+    onDownloadUsers: (String) -> Unit
 ) {
     val tabs = remember {
         listOf(
@@ -676,18 +571,16 @@ private fun MainTabs(
                 label = "tab"
             ) { index ->
                 when (index) {
-                    0 -> NetworkPage(palette, configs, runtime, nodesExpanded, onNodesExpandedChange, onStart, onStop, onEdit)
-                    1 -> ProfilesPage(palette, configs, runtime, onStart, onStop, onEdit, onNewConfig, onImportToml, onDeleteConfig, onDefaultConfig, onExportConfig)
+                    0 -> NetworkPage(palette, configs, runtime, nodesExpanded, onNodesExpandedChange, onStart, onStop, onEdit, rootController, rootAvailable, rootMode)
+                    1 -> ProfilesPage(palette, configs, runtime, rootController, rootAvailable, rootMode, onStart, onStop, onEdit, onNewConfig, onImportToml, onDeleteConfig, onDefaultConfig, onExportConfig)
                     2 -> ServersPage(palette, userServers, officialServers, onSaveUserServers, onAddOfficialServer, onDownloadUsers, onSyncOfficial)
                     else -> SettingsPage(
                         palette = palette,
                         settings = settings,
-                        configServerSupported = configServerSupported,
-                        configServerConnected = configServerConnected,
-                        configServerBusy = configServerBusy,
+                        rootController = rootController,
+                        rootAvailable = rootAvailable,
                         onSettings = onSettings,
-                        onConnectConfigServer = onConnectConfigServer,
-                        onDisconnectConfigServer = onDisconnectConfigServer
+                        onRefreshRoot = onRefreshRoot
                     )
                 }
             }
@@ -705,8 +598,22 @@ private fun NetworkPage(
     onNodesExpandedChange: (Boolean) -> Unit,
     onStart: (NetworkConfig) -> Unit,
     onStop: () -> Unit,
-    onEdit: (NetworkConfig) -> Unit
+    onEdit: (NetworkConfig) -> Unit,
+    rootController: RootTierController,
+    rootAvailable: Boolean,
+    rootMode: Boolean
 ) {
+    if (rootMode) {
+        RootNetworkPage(
+            palette = palette,
+            configs = configs,
+            rootController = rootController,
+            rootAvailable = rootAvailable,
+            onStart = onStart,
+            onEdit = onEdit
+        )
+        return
+    }
     val current = if (runtime.running) {
         configs.firstOrNull { it.id == runtime.runningConfigId } ?: configs.firstOrNull { it.isDefault }
     } else {
@@ -796,6 +703,148 @@ private fun NetworkPage(
 }
 
 @Composable
+private fun RootNetworkPage(
+    palette: Palette,
+    configs: List<NetworkConfig>,
+    rootController: RootTierController,
+    rootAvailable: Boolean,
+    onStart: (NetworkConfig) -> Unit,
+    onEdit: (NetworkConfig) -> Unit
+) {
+    val rootState = rootController.state
+    val instances = rootState.instances.filter { it.running || it.starting || it.stopping }
+    val current = configs.firstOrNull { it.isDefault } ?: configs.firstOrNull() ?: NetworkConfig.defaultConfig()
+    val core = rootState.core
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(top = 14.dp, bottom = 104.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            Header(
+                title = "Root 模式",
+                subtitle = if (rootAvailable) "可同时运行多个网络" else "未检测到 root，请在 KernelSU 中授权",
+                palette = palette
+            )
+        }
+        item {
+            QCard(palette) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusDot(if (rootAvailable) palette.success else palette.error)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (rootAvailable) "Root 可用" else "Root 不可用",
+                            color = palette.text,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            if (core.ready) "核心 ${core.installedVersion.ifBlank { "已安装" }}" else "尚未下载官方核心",
+                            color = palette.subText,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+                if (!core.ready) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "请先到设置下载 easytier-core 与 easytier-cli。",
+                        color = palette.subText,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        }
+
+        if (instances.isEmpty()) {
+            item {
+                QCard(palette) {
+                    Text(current.displayName, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(current.networkName.ifBlank { "尚未填写网络名称" }, color = palette.subText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        QButton(
+                            text = "启动",
+                            palette = palette,
+                            modifier = Modifier.weight(1f),
+                            enabled = rootAvailable && core.ready,
+                            icon = Icons.Rounded.PlayArrow,
+                            onClick = { onStart(current) }
+                        )
+                        QButton(
+                            text = "编辑",
+                            palette = palette,
+                            modifier = Modifier.weight(1f),
+                            primary = false,
+                            icon = Icons.Rounded.Edit,
+                            onClick = { onEdit(current) }
+                        )
+                    }
+                }
+            }
+        } else {
+            items(instances, key = { it.configId }) { instance ->
+                QCard(palette) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(instance.displayName, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                when {
+                                    instance.stopping -> "正在停止"
+                                    instance.starting -> "正在启动"
+                                    instance.localCidr.isNotBlank() -> "已连接: ${instance.localCidr}"
+                                    else -> "核心运行中"
+                                },
+                                color = palette.subText,
+                                fontSize = 12.sp
+                            )
+                        }
+                        QButton(
+                            text = "停止",
+                            palette = palette,
+                            modifier = Modifier.width(86.dp),
+                            compact = true,
+                            danger = true,
+                            enabled = !instance.stopping,
+                            onClick = { rootController.stop(instance.configId) }
+                        )
+                    }
+                    if (instance.error.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(instance.error, color = palette.error, fontSize = 12.sp, lineHeight = 17.sp)
+                    }
+                    if (instance.nodes.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("${instance.nodes.size} 个设备", color = palette.subText, fontSize = 12.sp)
+                    }
+                    val preview = instance.logs.takeLast(4)
+                    if (preview.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(palette.surfaceVariant)
+                                .padding(10.dp)
+                        ) {
+                            preview.forEach { line ->
+                                Text(line, color = palette.subText, fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun RunningStatus(palette: Palette, runtime: RuntimeState, nodesExpanded: Boolean, onNodesExpandedChange: (Boolean) -> Unit, label: String) {
     var logsExpanded by remember { mutableStateOf(false) }
     QCard(palette, modifier = Modifier.fillMaxWidth()) {
@@ -873,6 +922,9 @@ private fun ProfilesPage(
     palette: Palette,
     configs: List<NetworkConfig>,
     runtime: RuntimeState,
+    rootController: RootTierController,
+    rootAvailable: Boolean,
+    rootMode: Boolean,
     onStart: (NetworkConfig) -> Unit,
     onStop: () -> Unit,
     onEdit: (NetworkConfig) -> Unit,
@@ -881,9 +933,10 @@ private fun ProfilesPage(
     onDelete: (NetworkConfig) -> Unit,
     onDefault: (NetworkConfig) -> Unit,
     onExport: (NetworkConfig) -> Unit
-) {
+    ) {
     var pendingDeleteConfig by remember { mutableStateOf<NetworkConfig?>(null) }
     var deletingConfigId by remember { mutableStateOf<String?>(null) }
+    val rootState = rootController.state
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -893,7 +946,11 @@ private fun ProfilesPage(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Header("配置文件", "同一时间只能运行一个 VPN 配置", palette)
+            Header(
+                "配置文件",
+                if (rootMode) "Root 模式可同时运行多个网络" else "同一时间只能运行一个 VPN 配置",
+                palette
+            )
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -902,7 +959,13 @@ private fun ProfilesPage(
             }
         }
         items(configs, key = { it.id }) { cfg ->
-            val runningHere = runtime.running && runtime.runningConfigId == cfg.id
+            val rootInstance = if (rootMode) rootState.instances.firstOrNull { it.configId == cfg.id } else null
+            val runningHere = if (rootMode) {
+                rootInstance?.running == true || rootInstance?.starting == true || rootInstance?.stopping == true
+            } else {
+                runtime.running && runtime.runningConfigId == cfg.id
+            }
+            val runnable = if (rootMode) rootAvailable else true
             AnimatedVisibility(
                 visible = cfg.id != deletingConfigId,
                 exit = shrinkVertically(animationSpec = tween(280)) + fadeOut(tween(200))
@@ -918,12 +981,25 @@ private fun ProfilesPage(
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     QButton(
-                        text = if (runningHere) "停止" else "运行",
+                        text = when {
+                            rootInstance?.starting == true -> "启动中"
+                            rootInstance?.stopping == true -> "停止中"
+                            runningHere -> "停止"
+                            rootMode && !rootAvailable -> "无 Root"
+                            else -> "运行"
+                        },
                         palette = palette,
                         modifier = Modifier.weight(1f),
                         danger = runningHere,
+                        enabled = runningHere || runnable,
                         icon = if (runningHere) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
-                        onClick = { if (runningHere) onStop() else onStart(cfg) }
+                        onClick = {
+                            if (runningHere) {
+                                if (rootMode) rootController.stop(cfg.id) else onStop()
+                            } else {
+                                if (rootMode) rootController.start(cfg) else onStart(cfg)
+                            }
+                        }
                     )
                     QButton("编辑", palette, Modifier.weight(1f), primary = false, icon = Icons.Rounded.Edit, onClick = { onEdit(cfg) })
                 }
@@ -1095,24 +1171,13 @@ private fun ServersPage(
 private fun SettingsPage(
     palette: Palette,
     settings: AppSettings,
-    configServerSupported: Boolean,
-    configServerConnected: Boolean,
-    configServerBusy: Boolean,
+    rootController: RootTierController,
+    rootAvailable: Boolean,
     onSettings: (AppSettings) -> Unit,
-    onConnectConfigServer: () -> Unit,
-    onDisconnectConfigServer: () -> Unit
+    onRefreshRoot: () -> Unit
 ) {
     var disclaimer by remember { mutableStateOf(false) }
-    val configServerStatusText = when {
-        !configServerSupported -> "\u5f53\u524d\u5b98\u65b9\u5e93\u4e0d\u652f\u6301"
-        configServerConnected -> "\u5df2\u8fde\u63a5"
-        else -> "\u672a\u8fde\u63a5"
-    }
-    val configServerStatusColor = when {
-        !configServerSupported -> palette.subText
-        configServerConnected -> palette.success
-        else -> palette.error
-    }
+    val core = rootController.state.core
 
     LazyColumn(
         modifier = Modifier
@@ -1122,95 +1187,132 @@ private fun SettingsPage(
         contentPadding = PaddingValues(top = 14.dp, bottom = 26.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { Header("\u8bbe\u7f6e", "\u5e94\u7528\u504f\u597d\u4e0e\u914d\u7f6e\u670d\u52a1\u5668", palette) }
+        item { Header("设置", "运行模式与官方核心", palette) }
         item {
             QCard(palette) {
-                SwitchRow("\u81ea\u52a8\u540c\u6b65\u5b98\u65b9\u670d\u52a1\u5668", settings.autoSyncOfficialServers, palette) {
+                Text("运行模式", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ModeButton(
+                        text = "VPN 模式 (FFI)",
+                        selected = !settings.rootModeEnabled,
+                        palette = palette,
+                        modifier = Modifier.weight(1f),
+                        onClick = { onSettings(settings.copy(rootModeEnabled = false)) }
+                    )
+                    ModeButton(
+                        text = "Root 模式 (官方核心)",
+                        selected = settings.rootModeEnabled,
+                        palette = palette,
+                        modifier = Modifier.weight(1f),
+                        onClick = { onSettings(settings.copy(rootModeEnabled = true)) }
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusDot(if (rootAvailable) palette.success else palette.error)
+                    Text(
+                        if (rootAvailable) "Root 可用" else "未检测到 root",
+                        color = if (rootAvailable) palette.success else palette.error,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(Modifier.weight(1f))
+                    QButton(
+                        text = "重新检测",
+                        palette = palette,
+                        modifier = Modifier.width(104.dp),
+                        compact = true,
+                        primary = false,
+                        icon = Icons.Rounded.Refresh,
+                        onClick = onRefreshRoot
+                    )
+                }
+                if (!rootAvailable) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "请先在 KernelSU 中授权 MoonTier，再重新检测。",
+                        color = palette.subText,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        }
+        item {
+            QCard(palette) {
+                SwitchRow("自动同步官方服务器", settings.autoSyncOfficialServers, palette) {
                     onSettings(settings.copy(autoSyncOfficialServers = it))
                 }
-                SwitchRow("\u6df1\u8272\u6a21\u5f0f", settings.darkMode, palette) {
+                SwitchRow("深色模式", settings.darkMode, palette) {
                     onSettings(settings.copy(darkMode = it))
                 }
-                SwitchRow("\u81ea\u52a8\u914d\u7f6e\u51fa\u53e3\u8282\u70b9\u8def\u7531", settings.exitNodeAutoRoutes, palette) {
+                SwitchRow("自动配置出口节点路由", settings.exitNodeAutoRoutes, palette) {
                     if (it) disclaimer = true else onSettings(settings.copy(exitNodeAutoRoutes = false))
                 }
             }
         }
         item {
             QCard(palette) {
-                Text("\u914d\u7f6e\u670d\u52a1\u5668", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text("Root 官方核心", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatusDot(configServerStatusColor)
-                    Text(configServerStatusText, color = configServerStatusColor, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                }
-                Spacer(Modifier.height(14.dp))
-                FieldBlock("\u670d\u52a1\u5668 URL", palette) {
-                    QTextField(
-                        value = settings.configServerUrl,
-                        placeholder = "tcp://host:22020/token \u6216 \u76f4\u63a5\u586b\u7528\u6237\u540d",
-                        palette = palette,
-                        onValueChange = { onSettings(settings.copy(configServerUrl = it)) }
+                    StatusDot(if (core.ready) palette.success else palette.subText)
+                    Text(
+                        if (core.ready) "已安装 ${core.installedVersion}" else "尚未安装",
+                        color = if (core.ready) palette.success else palette.subText,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
                     )
                 }
-                FieldBlock("\u4e3b\u673a\u540d", palette) {
-                    QTextField(
-                        value = settings.configServerHostname,
-                        placeholder = "\u53ef\u9009\uff0c\u9ed8\u8ba4\u4f7f\u7528\u8bbe\u5907\u4e3b\u673a\u540d",
-                        palette = palette,
-                        onValueChange = { onSettings(settings.copy(configServerHostname = it)) }
+                if (core.latestVersion.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "最新官方版本: ${core.latestVersion}",
+                        color = palette.subText,
+                        fontSize = 12.sp,
                     )
                 }
-                FieldBlock("\u673a\u5668 ID", palette) {
-                    QTextField(
-                        value = settings.configServerMachineId,
-                        placeholder = "\u7559\u7a7a\u65f6\u81ea\u52a8\u751f\u6210",
-                        palette = palette,
-                        onValueChange = { onSettings(settings.copy(configServerMachineId = it)) }
-                    )
+                if (core.installing) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("正在下载 ${core.progress}%", color = palette.text, fontSize = 13.sp)
                 }
-                Spacer(Modifier.height(4.dp))
-                SwitchRow("\u4e0b\u53d1\u914d\u7f6e\u542f\u7528 Secure Mode", settings.configServerSecureMode, palette) {
-                    onSettings(settings.copy(configServerSecureMode = it))
-                }
-                Text(
-                    "\u8fd9\u4e2a\u5f00\u5173\u63a7\u5236\u914d\u7f6e\u670d\u52a1\u5668\u4e0b\u53d1\u7684 EasyTier \u5b9e\u4f8b\u662f\u5426\u542f\u7528 Secure Mode\uff0c\u4e0d\u662f URL \u4f20\u8f93\u5c42\u7684 TLS \u5f00\u5173\u3002",
-                    color = palette.subText,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp
-                )
-                SwitchRow("\u542f\u52a8\u65f6\u81ea\u52a8\u8fde\u63a5", settings.configServerAutoConnect, palette) {
-                    onSettings(settings.copy(configServerAutoConnect = it))
+                if (core.message.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(core.message, color = palette.subText, fontSize = 12.sp, lineHeight = 18.sp)
                 }
                 Spacer(Modifier.height(12.dp))
                 ActionBar(palette) {
                     QButton(
-                        text = if (configServerBusy && !configServerConnected) "\u8fde\u63a5\u4e2d" else "\u8fde\u63a5",
+                        text = if (core.checking) "检查中" else "检查更新",
                         palette = palette,
                         modifier = Modifier.weight(1f),
                         compact = true,
-                        enabled = configServerSupported && !configServerBusy && settings.configServerUrl.isNotBlank(),
-                        onClick = onConnectConfigServer
+                        primary = false,
+                        enabled = !core.checking && !core.installing,
+                        icon = Icons.Rounded.Refresh,
+                        onClick = { rootController.checkCoreUpdate() }
                     )
                     QButton(
-                        text = if (configServerBusy && configServerConnected) "\u65ad\u5f00\u4e2d" else "\u65ad\u5f00",
+                        text = if (core.installing) "下载中" else "下载核心",
                         palette = palette,
                         modifier = Modifier.weight(1f),
-                        primary = false,
                         compact = true,
-                        enabled = configServerSupported && !configServerBusy && configServerConnected,
-                        onClick = onDisconnectConfigServer
+                        enabled = !core.installing,
+                        icon = Icons.Rounded.Download,
+                        onClick = { rootController.installCore() }
                     )
                 }
-                if (!configServerSupported) {
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        "\u5f53\u524d\u8fd9\u4e2a libeasytier_ffi.so \u7248\u672c\u6ca1\u6709\u5bfc\u51fa\u914d\u7f6e\u670d\u52a1\u5668\u5ba2\u6237\u7aef\u63a5\u53e3\u3002",
-                        color = palette.subText,
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp
-                    )
+                Spacer(Modifier.height(8.dp))
+                SwitchRow("Root 模式自动检查更新", settings.coreAutoUpdate, palette) {
+                    onSettings(settings.copy(coreAutoUpdate = it))
                 }
+                Text(
+                    "Root 模式直接运行官方发布的 aarch64 easytier-core，可单独更新，不依赖 FFI。",
+                    color = palette.subText,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp
+                )
             }
         }
     }
@@ -1237,6 +1339,39 @@ private fun SettingsPage(
             },
             containerColor = palette.surface,
             shape = RoundedCornerShape(22.dp)
+        )
+    }
+}
+
+@Composable
+private fun ModeButton(
+    text: String,
+    selected: Boolean,
+    palette: Palette,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (selected) palette.accent else palette.surfaceVariant)
+            .border(
+                BorderStroke(if (selected) 0.dp else 0.7.dp, palette.border),
+                RoundedCornerShape(14.dp)
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            color = if (selected) palette.onAccent else palette.text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold
         )
     }
 }
@@ -2156,31 +2291,6 @@ private fun StatusDot(color: Color, size: Dp = 10.dp) {
 private fun FormLabel(text: String, palette: Palette) {
     Text(text, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 10.dp))
 }
-
-private const val CUSTOM_CONFIG_SERVER_FALLBACK = "tcp://ethd.ruixuan.online:22020"
-
-private fun normalizeConfigServerSettings(settings: AppSettings, supported: Boolean): AppSettings {
-    if (!supported) {
-        return settings.copy(
-            configServerUrl = settings.configServerUrl.trim(),
-            configServerHostname = settings.configServerHostname.trim(),
-            configServerMachineId = settings.configServerMachineId.trim()
-        )
-    }
-    return settings.copy(
-        configServerUrl = settings.configServerUrl.trim(),
-        configServerHostname = settings.configServerHostname.trim(),
-        configServerMachineId = settings.configServerMachineId.trim()
-    )
-}
-
-private fun resolveConfigServerUrlForApp(raw: String): String {
-    val trimmed = raw.trim()
-    if (trimmed.contains("://")) return trimmed
-    val token = java.net.URLEncoder.encode(trimmed, Charsets.UTF_8.name()).replace("+", "%20")
-    return "$CUSTOM_CONFIG_SERVER_FALLBACK/$token"
-}
-
 
 private fun <T> List<T>.replaceAt(index: Int, value: T): List<T> =
     mapIndexed { i, old -> if (i == index) value else old }

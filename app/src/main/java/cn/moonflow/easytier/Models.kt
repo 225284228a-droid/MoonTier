@@ -51,6 +51,7 @@ data class NetworkConfig(
     val disableIpv6: Boolean = false,
     val relayAllPeerRpc: Boolean = false,
     val mtu: Int = 0,
+    val rpcPortal: String = "",
     val defaultProtocol: String = "tcp",
     val encryptionAlgorithm: String = "aes-gcm",
     val aclToml: String = "",
@@ -107,6 +108,7 @@ data class NetworkConfig(
         .put("disable_ipv6", disableIpv6)
         .put("relay_all_peer_rpc", relayAllPeerRpc)
         .put("mtu", mtu)
+        .put("rpc_portal", rpcPortal)
         .put("default_protocol", defaultProtocol)
         .put("encryption_algorithm", encryptionAlgorithm)
         .put("acl_toml", aclToml)
@@ -178,6 +180,7 @@ data class NetworkConfig(
             disableIpv6 = obj.optBoolean("disable_ipv6", false),
             relayAllPeerRpc = obj.optBoolean("relay_all_peer_rpc", false),
             mtu = obj.optInt("mtu", 0),
+            rpcPortal = obj.optString("rpc_portal", ""),
             defaultProtocol = obj.optString("default_protocol", "tcp"),
             encryptionAlgorithm = obj.optString("encryption_algorithm", "aes-gcm"),
             aclToml = obj.optString("acl_toml", ""),
@@ -223,32 +226,23 @@ data class AppSettings(
     val autoSyncOfficialServers: Boolean = true,
     val exitNodeAutoRoutes: Boolean = false,
     val darkMode: Boolean = false,
-    val configServerUrl: String = "",
-    val configServerHostname: String = "",
-    val configServerMachineId: String = "",
-    val configServerSecureMode: Boolean = true,
-    val configServerAutoConnect: Boolean = false
+    val rootModeEnabled: Boolean = false,
+    val coreAutoUpdate: Boolean = true
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("auto_sync_official_servers", autoSyncOfficialServers)
         .put("exit_node_auto_routes", exitNodeAutoRoutes)
         .put("dark_mode", darkMode)
-        .put("config_server_url", configServerUrl)
-        .put("config_server_hostname", configServerHostname)
-        .put("config_server_machine_id", configServerMachineId)
-        .put("config_server_secure_mode", configServerSecureMode)
-        .put("config_server_auto_connect", configServerAutoConnect)
+        .put("root_mode_enabled", rootModeEnabled)
+        .put("core_auto_update", coreAutoUpdate)
 
     companion object {
         fun fromJson(obj: JSONObject): AppSettings = AppSettings(
             autoSyncOfficialServers = obj.optBoolean("auto_sync_official_servers", true),
             exitNodeAutoRoutes = obj.optBoolean("exit_node_auto_routes", false),
             darkMode = obj.optBoolean("dark_mode", false),
-            configServerUrl = obj.optString("config_server_url", ""),
-            configServerHostname = obj.optString("config_server_hostname", ""),
-            configServerMachineId = obj.optString("config_server_machine_id", ""),
-            configServerSecureMode = obj.optBoolean("config_server_secure_mode", true),
-            configServerAutoConnect = obj.optBoolean("config_server_auto_connect", false)
+            rootModeEnabled = obj.optBoolean("root_mode_enabled", false),
+            coreAutoUpdate = obj.optBoolean("core_auto_update", true)
         )
     }
 }
@@ -270,6 +264,35 @@ data class RuntimeState(
     val localCidr: String = "",
     val nodes: List<NodeInfo> = emptyList(),
     val logs: List<String> = emptyList()
+)
+
+data class RootInstanceState(
+    val configId: String = "",
+    val displayName: String = "",
+    val instanceName: String = "",
+    val pid: Long = 0,
+    val running: Boolean = false,
+    val starting: Boolean = false,
+    val stopping: Boolean = false,
+    val localCidr: String = "",
+    val nodes: List<NodeInfo> = emptyList(),
+    val logs: List<String> = emptyList(),
+    val error: String = ""
+)
+
+data class RootCoreState(
+    val ready: Boolean = false,
+    val installedVersion: String = "",
+    val latestVersion: String = "",
+    val checking: Boolean = false,
+    val installing: Boolean = false,
+    val progress: Int = 0,
+    val message: String = ""
+)
+
+data class RootTierState(
+    val core: RootCoreState = RootCoreState(),
+    val instances: List<RootInstanceState> = emptyList()
 )
 
 fun List<String>.cleanItems(): List<String> =

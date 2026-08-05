@@ -8,6 +8,7 @@ object TomlCodec {
         out += "instance_id = \"${esc(config.id)}\""
         out += "network_label = \"${esc(config.label)}\""
         out += "instance_name = \"${esc(config.instanceName)}\""
+        if (config.rpcPortal.isNotBlank()) out += "rpc_portal = \"${esc(config.rpcPortal)}\""
         if (config.hostname.isNotBlank()) out += "hostname = \"${esc(config.hostname)}\""
         out += "dhcp = ${config.dhcp}"
         if (!config.dhcp && config.ipv4.isNotBlank()) out += "ipv4 = \"${esc(config.ipv4)}\""
@@ -164,6 +165,7 @@ object TomlCodec {
             disableIpv6 = !bool(flags["enable_ipv6"], true),
             relayAllPeerRpc = bool(flags["relay_all_peer_rpc"], false),
             mtu = scalar(flags["mtu"].orEmpty()).toIntOrNull() ?: 0,
+            rpcPortal = scalar(root["rpc_portal"].orEmpty()),
             defaultProtocol = scalar(flags["default_protocol"].orEmpty()).ifBlank { "tcp" },
             encryptionAlgorithm = scalar(flags["encryption_algorithm"].orEmpty()).ifBlank { "aes-gcm" },
             aclToml = aclToml,

@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.net.IpPrefix
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -47,21 +48,14 @@ class EasyTierVpnService : VpnService() {
         }
 
         val instanceName = config.optString("instanceName")
-        val isConfigServerMode = config.optBoolean("configServerMode", false)
-        if (isConfigServerMode) {
-            pendingFd = pfd.fd
-            pendingInstanceName = instanceName
-            Log.i(TAG, "config server vpn ready, waiting for instance name")
-        } else {
-            val code = NativeEasyTier.setTunFd(instanceName, pfd.fd)
-            Log.i(TAG, "setTunFd(instance=$instanceName fd=${pfd.fd}) -> $code")
-            if (code != 0) {
-                Log.e(TAG, "setTunFd failed: ${NativeEasyTier.getLastError().orEmpty()}")
-                disconnect()
-                NativeEasyTier.stopAllInstances()
-                stopSelf()
-                return START_NOT_STICKY
-            }
+        val code = NativeEasyTier.setTunFd(instanceName, pfd.fd)
+        Log.i(TAG, "setTunFd(instance=$instanceName fd=${pfd.fd}) -> $code")
+        if (code != 0) {
+            Log.e(TAG, "setTunFd failed: ${NativeEasyTier.getLastError().orEmpty()}")
+            disconnect()
+            NativeEasyTier.stopAllInstances()
+            stopSelf()
+            return START_NOT_STICKY
         }
         return START_STICKY
     }
@@ -103,6 +97,22 @@ class EasyTierVpnService : VpnService() {
 
         if (dns.isNotBlank()) builder.addDnsServer(dns)
         runCatching { builder.addDisallowedApplication(packageName) }
+            .onFailure { Log.w(TAG, "addDisallowedApplication failed", it) }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val directCoreIps = config.optJSONArray("directCoreIps")
+            if (directCoreIps != null) {
+                for (i in 0 until directCoreIps.length()) {
+                    val ip = directCoreIps.optString(i)
+                    if (ip.isNotBlank()) {
+                        runCatching {
+                            builder.excludeRoute(IpPrefix(java.net.InetAddress.getByName(ip), 32))
+                        }
+                            .onFailure { Log.w(TAG, "skip exclude route: $ip", it) }
+                    }
+                }
+            }
+        }
 
         if (routes != null) {
             for (i in 0 until routes.length()) {
@@ -127,8 +137,6 @@ class EasyTierVpnService : VpnService() {
     }
 
     private fun shutdownVpn() {
-        pendingFd = -1
-        pendingInstanceName = ""
         disconnect()
         NativeEasyTier.stopAllInstances()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -168,26 +176,5 @@ class EasyTierVpnService : VpnService() {
         private const val NOTIFICATION_ID = 7
         const val ACTION_STOP = "cn.moonflow.easytier.action.STOP_VPN"
         const val EXTRA_CONFIG = "vpn_config"
-
-        @Volatile
-        var pendingFd: Int = -1
-            private set
-
-        @Volatile
-        var pendingInstanceName: String = ""
-            private set
-
-        fun tryAttachFd(instanceName: String): Boolean {
-            val fd = pendingFd
-            if (fd < 0 || instanceName.isBlank()) return false
-            val code = NativeEasyTier.setTunFd(instanceName, fd)
-            Log.i(TAG, "tryAttachFd(instance=$instanceName fd=$fd) -> $code")
-            if (code == 0) {
-                pendingInstanceName = instanceName
-                return true
-            }
-            Log.e(TAG, "tryAttachFd failed: ${NativeEasyTier.getLastError().orEmpty()}")
-            return false
-        }
     }
 }

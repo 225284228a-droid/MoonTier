@@ -1,7 +1,6 @@
 #include <jni.h>
 #include <algorithm>
 #include <cstdlib>
-#include <dlfcn.h>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -25,26 +24,6 @@ void free_string(const char *s);
 namespace {
 
 std::mutex ffiMutex;
-std::string bridgeError;
-JavaVM *gJvm = nullptr;
-jclass gNativeEasyTierClass = nullptr;
-jmethodID gDispatchMethod = nullptr;
-
-using ConfigServerEventCallback = void (*)(const char *, void *);
-using StartConfigServerClientFn = int (*)(const char *, const char *, const char *, bool, ConfigServerEventCallback, void *);
-using StopConfigServerClientFn = int (*)();
-using IsConfigServerClientConnectedFn = int (*)();
-
-template <typename T>
-T resolveSymbol(const char *name)
-{
-    return reinterpret_cast<T>(dlsym(RTLD_DEFAULT, name));
-}
-
-void setBridgeError(const std::string &message)
-{
-    bridgeError = message;
-}
 
 std::string toString(JNIEnv *env, jstring value)
 {
@@ -80,62 +59,13 @@ std::string jsonEscape(const char *raw)
     return out;
 }
 
-// --- JNI callback dispatcher ---
-
-void configServerEventCallbackC(const char *eventJson, void * /*userData*/)
-{
-    if (!gJvm || !eventJson)
-        return;
-
-    JNIEnv *env = nullptr;
-    bool needDetach = false;
-    int getEnvStat = gJvm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6);
-
-    if (getEnvStat == JNI_EDETACHED) {
-        if (gJvm->AttachCurrentThread(&env, nullptr) != JNI_OK)
-            return;
-        needDetach = true;
-    } else if (getEnvStat != JNI_OK || !env) {
-        return;
-    }
-
-    jclass cls = gNativeEasyTierClass;
-    jmethodID mid = gDispatchMethod;
-    if (cls && mid) {
-        jstring jEvent = env->NewStringUTF(eventJson);
-        if (jEvent) {
-            env->CallStaticVoidMethod(cls, mid, jEvent);
-            env->DeleteLocalRef(jEvent);
-        }
-    }
-
-    if (needDetach)
-        gJvm->DetachCurrentThread();
-}
-
 } // namespace
 
 // --- JNI_OnLoad ---
 
 extern "C" JNIEXPORT jint JNICALL
-JNI_OnLoad(JavaVM *vm, void * /*reserved*/)
+JNI_OnLoad(JavaVM *, void *)
 {
-    gJvm = vm;
-    JNIEnv *env = nullptr;
-    if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK)
-        return JNI_VERSION_1_6;
-
-    jclass localCls = env->FindClass("cn/moonflow/easytier/NativeEasyTier");
-    if (localCls) {
-        gNativeEasyTierClass = static_cast<jclass>(env->NewGlobalRef(localCls));
-        env->DeleteLocalRef(localCls);
-
-        gDispatchMethod = env->GetStaticMethodID(
-            gNativeEasyTierClass,
-            "dispatchConfigServerEvent",
-            "(Ljava/lang/String;)V");
-    }
-
     return JNI_VERSION_1_6;
 }
 
@@ -246,80 +176,6 @@ Java_cn_moonflow_easytier_NativeEasyTier_setTunFd(JNIEnv *env, jclass, jstring i
     return set_tun_fd(name.c_str(), fd);
 }
 
-// --- startConfigServerClient (with real callback) ---
-
-extern "C" JNIEXPORT jint JNICALL
-Java_cn_moonflow_easytier_NativeEasyTier_startConfigServerClient(
-    JNIEnv *env,
-    jclass,
-    jstring url,
-    jstring hostname,
-    jstring machineId,
-    jboolean secureMode)
-{
-    const auto startClient = resolveSymbol<StartConfigServerClientFn>("start_config_server_client");
-    if (!startClient) {
-        std::lock_guard<std::mutex> lock(ffiMutex);
-        setBridgeError("current libeasytier_ffi.so does not export start_config_server_client");
-        return -1;
-    }
-
-    const std::string urlValue = toString(env, url);
-    const std::string hostnameValue = toString(env, hostname);
-    const std::string machineIdValue = toString(env, machineId);
-    const char *hostnamePtr = hostnameValue.empty() ? nullptr : hostnameValue.c_str();
-
-    std::lock_guard<std::mutex> lock(ffiMutex);
-    return startClient(
-        urlValue.c_str(),
-        hostnamePtr,
-        machineIdValue.c_str(),
-        secureMode == JNI_TRUE,
-        configServerEventCallbackC,
-        nullptr);
-}
-
-// --- stopConfigServerClient ---
-
-extern "C" JNIEXPORT jint JNICALL
-Java_cn_moonflow_easytier_NativeEasyTier_stopConfigServerClient(JNIEnv *, jclass)
-{
-    const auto stopClient = resolveSymbol<StopConfigServerClientFn>("stop_config_server_client");
-    if (!stopClient) {
-        std::lock_guard<std::mutex> lock(ffiMutex);
-        setBridgeError("current libeasytier_ffi.so does not export stop_config_server_client");
-        return -1;
-    }
-
-    std::lock_guard<std::mutex> lock(ffiMutex);
-    return stopClient();
-}
-
-// --- isConfigServerClientConnected ---
-
-extern "C" JNIEXPORT jint JNICALL
-Java_cn_moonflow_easytier_NativeEasyTier_isConfigServerClientConnected(JNIEnv *, jclass)
-{
-    const auto isConnected = resolveSymbol<IsConfigServerClientConnectedFn>("is_config_server_client_connected");
-    if (!isConnected)
-        return 0;
-
-    std::lock_guard<std::mutex> lock(ffiMutex);
-    return isConnected();
-}
-
-// --- hasConfigServerClient ---
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_cn_moonflow_easytier_NativeEasyTier_hasConfigServerClient(JNIEnv *, jclass)
-{
-    const bool available =
-        resolveSymbol<StartConfigServerClientFn>("start_config_server_client") &&
-        resolveSymbol<StopConfigServerClientFn>("stop_config_server_client") &&
-        resolveSymbol<IsConfigServerClientConnectedFn>("is_config_server_client_connected");
-    return available ? JNI_TRUE : JNI_FALSE;
-}
-
 // --- getLastError ---
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -329,9 +185,7 @@ Java_cn_moonflow_easytier_NativeEasyTier_getLastError(JNIEnv *env, jclass)
     std::lock_guard<std::mutex> lock(ffiMutex);
     get_error_msg(&error);
     if (!error) {
-        if (bridgeError.empty())
-            return nullptr;
-        return env->NewStringUTF(bridgeError.c_str());
+        return nullptr;
     }
 
     jstring out = env->NewStringUTF(error);
