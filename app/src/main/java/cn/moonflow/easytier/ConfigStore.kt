@@ -22,24 +22,17 @@ class ConfigStore(private val context: Context) {
 
     @Synchronized
     fun loadConfigs(): List<NetworkConfig> {
-        if (!configsFile.exists()) {
-            val initial = listOf(NetworkConfig.defaultConfig())
-            saveConfigs(initial)
-            return initial
-        }
-
-        val array = runCatching { JSONArray(readTextAtomic(configsFile)) }.getOrNull()
-            ?: run {
-                val defaults = listOf(NetworkConfig.defaultConfig())
-                saveConfigs(defaults)
-                return defaults
+        val raw = readJsonArray(configsFile)
+        val configs = buildList {
+            if (raw != null) {
+                for (i in 0 until raw.length()) {
+                    raw.optJSONObject(i)?.let { add(NetworkConfig.fromJson(it)) }
+                }
             }
-        val configs = ArrayList<NetworkConfig>()
-        for (i in 0 until array.length()) {
-            val obj = array.optJSONObject(i) ?: continue
-            configs.add(NetworkConfig.fromJson(obj))
         }
-        return normalizeConfigs(configs)
+        val normalized = normalizeConfigs(configs)
+        if (normalized != configs) saveConfigs(normalized)
+        return normalized
     }
 
     @Synchronized
@@ -52,14 +45,28 @@ class ConfigStore(private val context: Context) {
 
     @Synchronized
     fun saveConfig(config: NetworkConfig) {
-        val existing = loadConfigs().filterNot { it.id == config.id }
-        saveConfigs(existing + config)
+        val configId = config.id.ifBlank { UUID.randomUUID().toString() }
+        val current = loadConfigs().toMutableList()
+        val index = current.indexOfFirst { it.id == configId }
+        val merged = if (index >= 0) {
+            val existing = current[index]
+            config.copy(id = configId, isRunning = config.isRunning || existing.isRunning)
+        } else {
+            config.copy(id = configId)
+        }
+
+        if (index >= 0) {
+            current[index] = merged
+        } else {
+            current += merged
+        }
+        saveConfigs(current)
     }
 
     @Synchronized
     fun deleteConfig(id: String) {
-        val current = loadConfigs().filterNot { it.id == id }
-        saveConfigs(if (current.isEmpty()) listOf(NetworkConfig.defaultConfig()) else current)
+        val filtered = loadConfigs().filterNot { it.id == id }
+        saveConfigs(filtered)
     }
 
     @Synchronized
@@ -67,19 +74,42 @@ class ConfigStore(private val context: Context) {
         saveConfigs(loadConfigs().map { it.copy(isDefault = it.id == id) })
     }
 
+    @Synchronized
+    fun updateConfigRunningState(id: String, running: Boolean) {
+        if (id.isBlank()) return
+        saveConfigs(
+            loadConfigs().map {
+                when {
+                    running -> it.copy(isRunning = it.id == id)
+                    it.id == id -> it.copy(isRunning = false)
+                    else -> it
+                }
+            }
+        )
+    }
+
     fun loadDefaultConfig(): NetworkConfig? =
-        loadConfigs().firstOrNull { it.isDefault }
+        loadConfigs().firstOrNull { it.isDefault } ?: loadConfigs().firstOrNull()
 
     @Synchronized
     fun loadSettings(): AppSettings {
-        if (!settingsFile.exists()) return AppSettings()
-        val obj = runCatching { JSONObject(readTextAtomic(settingsFile)) }.getOrNull() ?: JSONObject()
+        val obj = readJsonObject(settingsFile) ?: return AppSettings()
         return AppSettings.fromJson(obj)
     }
 
     @Synchronized
     fun saveSettings(settings: AppSettings) {
-        writeTextAtomic(settingsFile, settings.toJson().toString(2))
+        val merged = loadSettings().copy(
+            autoSyncOfficialServers = settings.autoSyncOfficialServers,
+            exitNodeAutoRoutes = settings.exitNodeAutoRoutes,
+            darkMode = settings.darkMode,
+            configServerUrl = settings.configServerUrl,
+            configServerHostname = settings.configServerHostname,
+            configServerMachineId = settings.configServerMachineId,
+            configServerSecureMode = settings.configServerSecureMode,
+            configServerAutoConnect = settings.configServerAutoConnect
+        )
+        writeTextAtomic(settingsFile, merged.toJson().toString(2))
     }
 
     @Synchronized
@@ -98,10 +128,13 @@ class ConfigStore(private val context: Context) {
         withContext(Dispatchers.IO) {
             val text = fetchServerText(source)
             val addresses = parseServerAddresses(text)
-            if (addresses.isEmpty()) throw IllegalStateException("官方源没有返回服务器地址，已保留本地缓存")
             val servers = addresses.map { ServerEntry(serverNameFromAddress(it), it) }
             saveOfficialServers(servers)
-            SyncResult(true, servers.size, if (servers.isEmpty()) "官方源没有返回服务器" else "官方服务器列表已刷新")
+            SyncResult(
+                true,
+                servers.size,
+                if (servers.isEmpty()) "官方源没有返回服务器" else "官方服务器列表已刷新"
+            )
         }
 
     suspend fun downloadUserServers(source: String): SyncResult =
@@ -116,11 +149,15 @@ class ConfigStore(private val context: Context) {
                 .filter { existing.add(it.lowercase()) }
                 .map {
                     val name = nextServerNameFromNames(usedNames, serverNameFromAddress(it))
-                    usedNames.add(name)
+                    usedNames += name
                     ServerEntry(name, it)
                 }
             saveUserServers(current + added)
-            SyncResult(true, added.size, if (added.isEmpty()) "没有发现新的用户收藏服务器" else "已添加 ${added.size} 个服务器")
+            SyncResult(
+                true,
+                added.size,
+                if (added.isEmpty()) "没有发现新的用户收藏服务器" else "已添加 ${added.size} 个服务器"
+            )
         }
 
     private fun fetchServerSourcesRecursive(
@@ -129,63 +166,69 @@ class ConfigStore(private val context: Context) {
         visited: HashSet<String>,
         depth: Int
     ) {
-        if (depth >= 5) return  // 最多递归5层，防止无限循环
+        if (depth >= 5) return
         val key = source.trim().lowercase()
-        if (!visited.add(key)) return  // 已访问过，跳过
+        if (!visited.add(key)) return
 
         val text = runCatching { fetchServerText(source) }.getOrNull() ?: return
+        out += parseServerAddresses(text)
 
-        // 解析服务器地址
-        val addresses = parseServerAddresses(text)
-        out.addAll(addresses)
-
-        // 从文本中提取额外的递归源（TXT 域名 或 HTTP(S) URL）
-        val recursiveSources = extractRecursiveSources(text)
-        for (nextSource in recursiveSources) {
+        for (nextSource in extractRecursiveSources(text)) {
             fetchServerSourcesRecursive(nextSource, out, visited, depth + 1)
         }
     }
 
     private fun extractRecursiveSources(text: String): List<String> {
-        val sources = ArrayList<String>()
-        // 匹配 TXT 记录域名（纯域名，不含协议头）
-        val domainPattern = Pattern.compile("(?i)(?:^|\\s)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}(?:\\.[a-z]{2,})?(?=\\s|\$|,|;)", Pattern.MULTILINE)
-        val txtMatcher = domainPattern.matcher(text)
-        while (txtMatcher.find()) {
-            val domain = txtMatcher.group()?.trim().orEmpty()
-            if (domain.isNotBlank() && !domain.startsWith("http") && !domain.contains("://") && domain.contains(".")) {
-                sources.add(domain)
+        val out = ArrayList<String>()
+        val domainPattern = Pattern.compile(
+            "(?i)(?:^|\\s)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,}(?:\\.[a-z]{2,})?(?=\\s|$|,|;)",
+            Pattern.MULTILINE
+        )
+        val matcher = domainPattern.matcher(text)
+        while (matcher.find()) {
+            val domain = matcher.group()?.trim().orEmpty()
+            if (domain.isNotBlank() && !domain.startsWith("http") && !domain.contains("://")) {
+                out += domain
             }
         }
-        return sources
+        return out
     }
 
     private fun normalizeConfigs(configs: List<NetworkConfig>): List<NetworkConfig> {
-        if (configs.isEmpty()) return emptyList()
-        val list = configs
-        val defaultId = list.firstOrNull { it.isDefault }?.id ?: list.first().id
+        val source = if (configs.isEmpty()) listOf(NetworkConfig.defaultConfig()) else configs
+        val firstDefaultId = source.firstOrNull { it.isDefault }?.id ?: source.first().id
+        val firstRunningId = source.firstOrNull { it.isRunning }?.id
         val usedInstances = HashSet<String>()
-        return list.mapIndexed { index, cfg ->
-            val label = cfg.label.ifBlank { cfg.networkName.ifBlank { "配置 ${index + 1}" } }
-            val baseInstance = cfg.instanceName.trim().ifBlank { "MoonTier-${cfg.id.take(8)}" }
+
+        return source.mapIndexed { index, config ->
+            val label = config.label.trim().ifBlank {
+                config.networkName.trim().ifBlank { "配置 ${index + 1}" }
+            }
+            val baseInstance = config.instanceName.trim().ifBlank {
+                "MoonTier-${config.id.take(8)}"
+            }
             var instance = baseInstance
             var suffix = 1
             while (!usedInstances.add(instance.lowercase())) {
                 instance = "$baseInstance-$suffix"
                 suffix += 1
             }
-            cfg.copy(label = label, instanceName = instance, isDefault = cfg.id == defaultId)
+            config.copy(
+                label = label,
+                instanceName = instance,
+                isDefault = config.id == firstDefaultId,
+                isRunning = firstRunningId != null && config.id == firstRunningId
+            )
         }
     }
 
     private fun loadServerFile(file: File): List<ServerEntry> {
-        if (!file.exists()) return emptyList()
-        val array = runCatching { JSONArray(readTextAtomic(file)) }.getOrNull() ?: return emptyList()
+        val array = readJsonArray(file) ?: return emptyList()
         val out = ArrayList<ServerEntry>()
         for (i in 0 until array.length()) {
             val item = array.optJSONObject(i) ?: continue
             val server = ServerEntry.fromJson(item)
-            if (server.address.isNotBlank()) out.add(server)
+            if (server.address.isNotBlank()) out += server
         }
         return out.distinctBy { it.address.lowercase() }
     }
@@ -199,8 +242,16 @@ class ConfigStore(private val context: Context) {
         writeTextAtomic(file, array.toString(2))
     }
 
-    private fun readTextAtomic(file: File): String =
-        String(AtomicFile(file).readFully(), Charsets.UTF_8)
+    private fun readJsonArray(file: File): JSONArray? =
+        runCatching { JSONArray(readTextAtomic(file)) }.getOrNull()
+
+    private fun readJsonObject(file: File): JSONObject? =
+        runCatching { JSONObject(readTextAtomic(file)) }.getOrNull()
+
+    private fun readTextAtomic(file: File): String {
+        if (!file.exists()) return ""
+        return String(AtomicFile(file).readFully(), Charsets.UTF_8)
+    }
 
     private fun writeTextAtomic(file: File, text: String) {
         file.parentFile?.mkdirs()
@@ -222,9 +273,9 @@ class ConfigStore(private val context: Context) {
         while (matcher.find()) {
             val cleaned = matcher.group(1)
                 ?.trim()
-                ?.trimEnd(',', ';', ')', '}')
+                ?.trimEnd('.', ',', ';', ')', ']', '}')
                 .orEmpty()
-            if (cleaned.isNotBlank()) out.add(cleaned)
+            if (cleaned.isNotBlank()) out += cleaned
         }
         return out.cleanItems()
     }
@@ -258,12 +309,12 @@ class ConfigStore(private val context: Context) {
         val errors = ArrayList<String>()
         for (provider in providers) {
             val response = runCatching { httpGet(provider, accept = "application/dns-json") }
-                .onFailure { errors.add("${URL(provider).host}: ${it.message ?: it.javaClass.simpleName}") }
+                .onFailure { errors += "${URL(provider).host}: ${it.message ?: it.javaClass.simpleName}" }
                 .getOrNull()
                 ?: continue
             val text = parseDnsJsonTxtResponse(response)
             if (parseServerAddresses(text).isNotEmpty()) return text
-            errors.add("${URL(provider).host}: TXT 记录为空")
+            errors += "${URL(provider).host}: TXT 记录为空"
         }
         throw IllegalStateException("TXT 解析失败：${errors.joinToString("；")}")
     }
@@ -273,7 +324,7 @@ class ConfigStore(private val context: Context) {
         val parts = ArrayList<String>()
         for (i in 0 until answer.length()) {
             val data = answer.optJSONObject(i)?.optString("data").orEmpty()
-            if (data.isNotBlank()) parts.add(decodeDnsTxtData(data))
+            if (data.isNotBlank()) parts += decodeDnsTxtData(data)
         }
         return parts.joinToString("\n")
     }
@@ -281,23 +332,23 @@ class ConfigStore(private val context: Context) {
     private fun decodeDnsTxtData(raw: String): String {
         val text = raw.trim().trim('"')
         val out = StringBuilder()
-        var i = 0
-        while (i < text.length) {
-            if (text[i] == '\\' && i + 3 < text.length) {
-                val code = text.substring(i + 1, i + 4).toIntOrNull()
+        var index = 0
+        while (index < text.length) {
+            if (text[index] == '\\' && index + 3 < text.length) {
+                val code = text.substring(index + 1, index + 4).toIntOrNull()
                 if (code != null) {
                     out.append(code.toChar())
-                    i += 4
+                    index += 4
                     continue
                 }
             }
-            if (text[i] == '"' && i + 2 < text.length && text[i + 1] == ' ' && text[i + 2] == '"') {
+            if (text[index] == '"' && index + 2 < text.length && text[index + 1] == ' ' && text[index + 2] == '"') {
                 out.append('\n')
-                i += 3
+                index += 3
                 continue
             }
-            out.append(text[i])
-            i++
+            out.append(text[index])
+            index += 1
         }
         return out.toString()
     }
@@ -318,10 +369,6 @@ class ConfigStore(private val context: Context) {
             .filter { Ipv4.isPublicIpv4(it) }
             .distinct()
     }.getOrDefault(emptyList())
-
-    companion object {
-        const val OFFICIAL_SOURCE = "etserverlist.225284.xyz"
-    }
 }
 
 data class SyncResult(
@@ -329,3 +376,5 @@ data class SyncResult(
     val count: Int,
     val message: String
 )
+
+private const val OFFICIAL_SOURCE = "etserverlist.225284.xyz"

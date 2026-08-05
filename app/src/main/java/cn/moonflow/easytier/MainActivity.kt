@@ -1,4 +1,4 @@
-package cn.moonflow.easytier
+﻿package cn.moonflow.easytier
 
 import android.app.Activity
 import android.content.Intent
@@ -95,6 +95,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -284,6 +285,7 @@ private fun MoonTierApp(
     exportToml: (NetworkConfig) -> Unit,
     bindImportHandler: (((NetworkConfig) -> Unit, (String, String) -> Unit) -> Unit)
 ) {
+    val androidContext = LocalContext.current
     var settings by remember { mutableStateOf(store.loadSettings()) }
     var nodesExpanded by remember { mutableStateOf(false) }
     var configs by remember { mutableStateOf(store.loadConfigs()) }
@@ -328,43 +330,54 @@ private fun MoonTierApp(
         scope.launch {
             val normalized = normalizeConfigServerSettings(settings, configServerSupported)
             if (!configServerSupported) {
-                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u5f53\u524d libeasytier_ffi.so \u4e0d\u652f\u6301\u914d\u7f6e\u670d\u52a1\u5668\u63a5\u53e3\u3002"
+                dialog = "配置服务器" to "当前 libeasytier_ffi.so 不支持配置服务器接口。"
                 return@launch
             }
             if (normalized.configServerUrl.isBlank()) {
-                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u8bf7\u5148\u586b\u5199\u670d\u52a1\u5668 URL\u3002"
+                dialog = "配置服务器" to "请先填写服务器 URL。"
                 return@launch
             }
             val resolvedConfigServerUrl = resolveConfigServerUrlForApp(normalized.configServerUrl)
             if (resolvedConfigServerUrl.isBlank()) {
-                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u670d\u52a1\u5668 URL \u4e0d\u80fd\u4e3a\u7a7a\u3002"
+                dialog = "配置服务器" to "服务器 URL 不能为空。"
                 return@launch
             }
             if (normalized != settings) saveSettings(normalized)
 
-            configServerBusy = true
-            val result = runCatching {
-                withContext(Dispatchers.IO) {
-                    NativeEasyTier.startConfigServerClient(
-                        resolvedConfigServerUrl,
-                        normalized.configServerHostname,
-                        normalized.configServerMachineId,
-                        normalized.configServerSecureMode
-                    )
-                }
-            }
-            configServerBusy = false
-
-            if (result.isFailure) {
-                val error = result.exceptionOrNull()
-                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to (error?.message ?: "\u8fde\u63a5\u5931\u8d25\u3002")
+            val hostname = normalized.configServerHostname.trim()
+            val machineId = normalized.configServerMachineId.trim()
+            val useSystemDefaults = hostname.isBlank() && machineId.isBlank()
+            val effectiveHostname = if (useSystemDefaults) {
+                Build.MODEL.trim().ifBlank { "Android" }
             } else {
-                val code = result.getOrThrow()
-                refreshConfigServerConnectionState()
-                if (code != 0) {
-                    dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to (NativeEasyTier.getLastError().orEmpty().ifBlank { "\u8fde\u63a5\u5931\u8d25\u3002" })
-                } else if (showSuccessToast) {
-                    dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u5df2\u53d1\u8d77\u8fde\u63a5\u3002"
+                hostname
+            }
+            val effectiveMachineId = if (useSystemDefaults) {
+                android.provider.Settings.Secure.getString(
+                    androidContext.contentResolver,
+                    android.provider.Settings.Secure.ANDROID_ID
+                ).orEmpty()
+                    .trim()
+                    .ifBlank { java.util.UUID.randomUUID().toString() }
+            } else {
+                machineId
+            }
+
+            configServerBusy = true
+            controller.connectConfigServer(
+                url = resolvedConfigServerUrl,
+                hostname = effectiveHostname,
+                machineId = effectiveMachineId,
+                secureMode = normalized.configServerSecureMode
+            ) { code, message ->
+                scope.launch {
+                    configServerBusy = false
+                    refreshConfigServerConnectionState()
+                    if (code != 0) {
+                        dialog = "配置服务器" to (message ?: "连接失败。")
+                    } else if (showSuccessToast) {
+                        dialog = "配置服务器" to "已发起连接。"
+                    }
                 }
             }
         }
@@ -373,26 +386,20 @@ private fun MoonTierApp(
     fun disconnectConfigServer(showSuccessToast: Boolean) {
         scope.launch {
             if (!configServerSupported) {
-                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u5f53\u524d libeasytier_ffi.so \u4e0d\u652f\u6301\u914d\u7f6e\u670d\u52a1\u5668\u63a5\u53e3\u3002"
+                dialog = "配置服务器" to "当前 libeasytier_ffi.so 不支持配置服务器接口。"
                 return@launch
             }
 
             configServerBusy = true
-            val result = runCatching {
-                withContext(Dispatchers.IO) { NativeEasyTier.stopConfigServerClient() }
-            }
-            configServerBusy = false
-
-            if (result.isFailure) {
-                val error = result.exceptionOrNull()
-                dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to (error?.message ?: "\u65ad\u5f00\u5931\u8d25\u3002")
-            } else {
-                val code = result.getOrThrow()
-                refreshConfigServerConnectionState()
-                if (code != 0) {
-                    dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to (NativeEasyTier.getLastError().orEmpty().ifBlank { "\u65ad\u5f00\u5931\u8d25\u3002" })
-                } else if (showSuccessToast) {
-                    dialog = "\u914d\u7f6e\u670d\u52a1\u5668" to "\u5df2\u65ad\u5f00\u8fde\u63a5\u3002"
+            controller.disconnectConfigServer { code, message ->
+                scope.launch {
+                    configServerBusy = false
+                    refreshConfigServerConnectionState()
+                    if (code != 0) {
+                        dialog = "配置服务器" to (message ?: "断开失败。")
+                    } else if (showSuccessToast) {
+                        dialog = "配置服务器" to "已断开连接。"
+                    }
                 }
             }
         }
@@ -441,16 +448,15 @@ private fun MoonTierApp(
     LaunchedEffect(
         configServerSupported,
         settings.configServerAutoConnect,
-        controller.state.running
+        settings.configServerUrl,
+        settings.configServerHostname,
+        settings.configServerMachineId,
+        settings.configServerSecureMode
     ) {
         if (!configServerSupported) return@LaunchedEffect
         if (configServerAutoConnectTried) return@LaunchedEffect
         if (!settings.configServerAutoConnect) return@LaunchedEffect
         if (settings.configServerUrl.isBlank()) return@LaunchedEffect
-        if (controller.state.running) {
-            configServerAutoConnectTried = true
-            return@LaunchedEffect
-        }
         if (configServerConnected) {
             configServerAutoConnectTried = true
             return@LaunchedEffect
@@ -506,10 +512,7 @@ private fun MoonTierApp(
                         runtime = runtime,
                         userServers = userServers,
                         officialServers = officialServers,
-                        onStart = {
-                            if (configServerConnected) disconnectConfigServer(showSuccessToast = false)
-                            controller.start(it)
-                        },
+                        onStart = { controller.start(it) },
                         onStop = { controller.stop() },
                         onEdit = { editingConfig = it },
                         onNewConfig = {
@@ -1128,7 +1131,7 @@ private fun SettingsPage(
                 SwitchRow("\u6df1\u8272\u6a21\u5f0f", settings.darkMode, palette) {
                     onSettings(settings.copy(darkMode = it))
                 }
-                SwitchRow("\u81ea\u52a8\u4e0b\u53d1\u51fa\u53e3\u8282\u70b9\u8def\u7531", settings.exitNodeAutoRoutes, palette) {
+                SwitchRow("\u81ea\u52a8\u914d\u7f6e\u51fa\u53e3\u8282\u70b9\u8def\u7531", settings.exitNodeAutoRoutes, palette) {
                     if (it) disclaimer = true else onSettings(settings.copy(exitNodeAutoRoutes = false))
                 }
             }
@@ -1136,13 +1139,6 @@ private fun SettingsPage(
         item {
             QCard(palette) {
                 Text("\u914d\u7f6e\u670d\u52a1\u5668", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "\u672c\u5730\u5b9e\u4f8b\u4f18\u5148\u7ea7\u9ad8\u4e8e\u914d\u7f6e\u670d\u52a1\u5668\uff0c\u4e24\u8005\u4e0d\u80fd\u540c\u65f6\u8fd0\u884c\u3002\u542f\u52a8\u672c\u5730\u7f51\u7edc\u65f6\u4f1a\u81ea\u52a8\u65ad\u5f00\u914d\u7f6e\u670d\u52a1\u5668\u3002",
-                    color = palette.subText,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp
-                )
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     StatusDot(configServerStatusColor)
@@ -1183,7 +1179,7 @@ private fun SettingsPage(
                     fontSize = 12.sp,
                     lineHeight = 18.sp
                 )
-                SwitchRow("\u542f\u52a8\u65f6\u81ea\u52a8\u8fde\u63a5\uff08\u672c\u5730\u5b9e\u4f8b\u542f\u52a8\u65f6\u81ea\u52a8\u8df3\u8fc7\uff09", settings.configServerAutoConnect, palette) {
+                SwitchRow("\u542f\u52a8\u65f6\u81ea\u52a8\u8fde\u63a5", settings.configServerAutoConnect, palette) {
                     onSettings(settings.copy(configServerAutoConnect = it))
                 }
                 Spacer(Modifier.height(12.dp))
@@ -2174,7 +2170,7 @@ private fun normalizeConfigServerSettings(settings: AppSettings, supported: Bool
     return settings.copy(
         configServerUrl = settings.configServerUrl.trim(),
         configServerHostname = settings.configServerHostname.trim(),
-        configServerMachineId = settings.configServerMachineId.trim().ifBlank { java.util.UUID.randomUUID().toString() }
+        configServerMachineId = settings.configServerMachineId.trim()
     )
 }
 

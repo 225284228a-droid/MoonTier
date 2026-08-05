@@ -14,6 +14,7 @@ data class NetworkConfig(
     val dhcp: Boolean = true,
     val ipv4: String = "",
     val peerUrls: List<String> = emptyList(),
+    val stunServers: List<String> = emptyList(),
     val listenerUrls: List<String> = emptyList(),
     val proxyCidrs: List<String> = emptyList(),
     val enableManualRoutes: Boolean = false,
@@ -53,7 +54,8 @@ data class NetworkConfig(
     val defaultProtocol: String = "tcp",
     val encryptionAlgorithm: String = "aes-gcm",
     val aclToml: String = "",
-    val isDefault: Boolean = true
+    val isDefault: Boolean = true,
+    val isRunning: Boolean = false
 ) {
     val displayName: String
         get() = label.ifBlank { networkName.ifBlank { "未命名配置" } }
@@ -68,6 +70,7 @@ data class NetworkConfig(
         .put("dhcp", dhcp)
         .put("ipv4", ipv4)
         .put("servers", peerUrls.toJsonArray())
+        .put("stun_servers", stunServers.toJsonArray())
         .put("listen_addresses", listenerUrls.toJsonArray())
         .put("proxy_networks", proxyCidrs.toJsonArray())
         .put("enable_manual_routes", enableManualRoutes)
@@ -108,10 +111,12 @@ data class NetworkConfig(
         .put("encryption_algorithm", encryptionAlgorithm)
         .put("acl_toml", aclToml)
         .put("is_default", isDefault)
+        .put("is_running", isRunning)
 
     companion object {
         fun defaultConfig(default: Boolean = true): NetworkConfig = NetworkConfig(
             id = UUID.randomUUID().toString(),
+            label = "默认配置",
             isDefault = default
         )
 
@@ -125,14 +130,26 @@ data class NetworkConfig(
             dhcp = obj.optBoolean("dhcp", true),
             ipv4 = obj.optString("ipv4", ""),
             peerUrls = obj.optStringArrayCompat("peer_urls", "servers"),
+            stunServers = obj.optStringArrayCompat("stun_servers", "stunServers"),
             listenerUrls = obj.optStringArrayCompat("listener_urls", "listen_addresses"),
             proxyCidrs = obj.optStringArrayCompat("proxy_cidrs", "proxy_networks"),
             enableManualRoutes = obj.optBoolean("enable_manual_routes", false),
             routes = obj.optStringArrayCompat("routes", "custom_routes"),
             exitNodes = obj.optStringArray("exit_nodes"),
-            enableRelayNetworkWhitelist = obj.optBooleanCompat("enable_relay_network_whitelist", "foreign_network_whitelist_enabled", false),
-            relayNetworkWhitelist = obj.optStringArrayCompat("relay_network_whitelist", "foreign_network_whitelist"),
-            proxyForwardBySystem = obj.optBooleanCompat("proxy_forward_by_system", "system_forwarding", false),
+            enableRelayNetworkWhitelist = obj.optBooleanCompat(
+                "enable_relay_network_whitelist",
+                "foreign_network_whitelist_enabled",
+                false
+            ),
+            relayNetworkWhitelist = obj.optStringArrayCompat(
+                "relay_network_whitelist",
+                "foreign_network_whitelist"
+            ),
+            proxyForwardBySystem = obj.optBooleanCompat(
+                "proxy_forward_by_system",
+                "system_forwarding",
+                false
+            ),
             enableExitNode = obj.optBoolean("enable_exit_node", false),
             enableMagicDns = obj.optBooleanCompat("enable_magic_dns", "accept_dns", false),
             enablePrivateMode = obj.optBooleanCompat("enable_private_mode", "private_mode", true),
@@ -164,7 +181,8 @@ data class NetworkConfig(
             defaultProtocol = obj.optString("default_protocol", "tcp"),
             encryptionAlgorithm = obj.optString("encryption_algorithm", "aes-gcm"),
             aclToml = obj.optString("acl_toml", ""),
-            isDefault = obj.optBoolean("is_default", false)
+            isDefault = obj.optBoolean("is_default", false),
+            isRunning = obj.optBoolean("is_running", false)
         )
     }
 }

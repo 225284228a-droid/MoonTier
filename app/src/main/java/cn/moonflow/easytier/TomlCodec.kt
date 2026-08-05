@@ -12,6 +12,7 @@ object TomlCodec {
         out += "dhcp = ${config.dhcp}"
         if (!config.dhcp && config.ipv4.isNotBlank()) out += "ipv4 = \"${esc(config.ipv4)}\""
         if (config.listenerUrls.isNotEmpty()) out += "listeners = ${array(config.listenerUrls)}"
+        if (config.stunServers.isNotEmpty()) out += "stun_servers = ${array(config.stunServers)}"
         if (config.enableManualRoutes) out += "routes = ${array(config.routes)}"
         if (config.exitNodes.isNotEmpty()) out += "exit_nodes = ${array(config.exitNodes)}"
 
@@ -126,6 +127,7 @@ object TomlCodec {
             dhcp = bool(root["dhcp"], true),
             ipv4 = scalar(root["ipv4"].orEmpty()),
             peerUrls = peers.cleanItems(),
+            stunServers = strings(root["stun_servers"]),
             listenerUrls = strings(root["listeners"]),
             proxyCidrs = proxyCidrs.cleanItems(),
             enableManualRoutes = root.containsKey("routes"),

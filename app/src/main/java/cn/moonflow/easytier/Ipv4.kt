@@ -1,6 +1,7 @@
 package cn.moonflow.easytier
 
 import java.net.URI
+import java.util.regex.Pattern
 import kotlin.math.min
 
 object Ipv4 {
@@ -142,7 +143,7 @@ fun buildVpnConfigJson(
 
 fun directPublicIpsFor(config: NetworkConfig, store: ConfigStore): Set<String> {
     val out = LinkedHashSet<String>()
-    config.peerUrls.forEach { url ->
+    (config.peerUrls + config.stunServers).forEach { url ->
         val host = Ipv4.hostFromUrl(url)
         Ipv4.parseAddress(host)?.let {
             if (Ipv4.isPublicIpv4(host)) out += host
@@ -151,4 +152,42 @@ fun directPublicIpsFor(config: NetworkConfig, store: ConfigStore): Set<String> {
         }
     }
     return out.take(4).toSet()
+}
+
+fun collectDirectPublicIpsForExitRoutes(
+    config: NetworkConfig,
+    store: ConfigStore,
+    runtimeText: String
+): Set<String> {
+    val out = LinkedHashSet<String>()
+    out += directPublicIpsFor(config, store)
+    out += extractDirectPublicIpsFromRuntime(runtimeText)
+    return out.take(4).toSet()
+}
+
+private fun extractDirectPublicIpsFromRuntime(runtimeText: String): Set<String> {
+    val out = LinkedHashSet<String>()
+    if (runtimeText.isBlank()) return out
+
+    val mappedAddrRe = Pattern.compile("""mapped_addr=Some\(SocketAddr\s*\{[^\n}]*ip:\s*Some\(Ipv4\((\d{1,3}(?:\.\d{1,3}){3})\)\)""")
+    val publicIpv4Re = Pattern.compile("""public_ipv4:\s*Some\((\d{1,3}(?:\.\d{1,3}){3})\)""")
+    val destAddrRe = Pattern.compile("""dest_addr=Some\(SocketAddr\s*\{[^\n}]*ip:\s*Some\(Ipv4\((\d{1,3}(?:\.\d{1,3}){3})\)\)""")
+
+    val mappedMatcher = mappedAddrRe.matcher(runtimeText)
+    var mappedIp = ""
+    if (mappedMatcher.find()) mappedIp = mappedMatcher.group(1).orEmpty()
+
+    val publicMatcher = publicIpv4Re.matcher(runtimeText)
+    while (publicMatcher.find()) {
+        val ip = publicMatcher.group(1).orEmpty()
+        if (ip.isNotBlank()) out += ip
+    }
+
+    val destMatcher = destAddrRe.matcher(runtimeText)
+    while (destMatcher.find()) {
+        val ip = destMatcher.group(1).orEmpty()
+        if (ip.isNotBlank() && ip != mappedIp) out += ip
+    }
+
+    return out
 }

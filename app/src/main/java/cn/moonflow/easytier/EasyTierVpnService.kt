@@ -1,4 +1,4 @@
-package cn.moonflow.easytier
+﻿package cn.moonflow.easytier
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -47,14 +47,21 @@ class EasyTierVpnService : VpnService() {
         }
 
         val instanceName = config.optString("instanceName")
-        val code = NativeEasyTier.setTunFd(instanceName, pfd.fd)
-        Log.i(TAG, "setTunFd(instance=$instanceName fd=${pfd.fd}) -> $code")
-        if (code != 0) {
-            Log.e(TAG, "setTunFd failed: ${NativeEasyTier.getLastError().orEmpty()}")
-            disconnect()
-            NativeEasyTier.stopAllInstances()
-            stopSelf()
-            return START_NOT_STICKY
+        val isConfigServerMode = config.optBoolean("configServerMode", false)
+        if (isConfigServerMode) {
+            pendingFd = pfd.fd
+            pendingInstanceName = instanceName
+            Log.i(TAG, "config server vpn ready, waiting for instance name")
+        } else {
+            val code = NativeEasyTier.setTunFd(instanceName, pfd.fd)
+            Log.i(TAG, "setTunFd(instance=$instanceName fd=${pfd.fd}) -> $code")
+            if (code != 0) {
+                Log.e(TAG, "setTunFd failed: ${NativeEasyTier.getLastError().orEmpty()}")
+                disconnect()
+                NativeEasyTier.stopAllInstances()
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
         return START_STICKY
     }
@@ -120,6 +127,8 @@ class EasyTierVpnService : VpnService() {
     }
 
     private fun shutdownVpn() {
+        pendingFd = -1
+        pendingInstanceName = ""
         disconnect()
         NativeEasyTier.stopAllInstances()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -159,5 +168,26 @@ class EasyTierVpnService : VpnService() {
         private const val NOTIFICATION_ID = 7
         const val ACTION_STOP = "cn.moonflow.easytier.action.STOP_VPN"
         const val EXTRA_CONFIG = "vpn_config"
+
+        @Volatile
+        var pendingFd: Int = -1
+            private set
+
+        @Volatile
+        var pendingInstanceName: String = ""
+            private set
+
+        fun tryAttachFd(instanceName: String): Boolean {
+            val fd = pendingFd
+            if (fd < 0 || instanceName.isBlank()) return false
+            val code = NativeEasyTier.setTunFd(instanceName, fd)
+            Log.i(TAG, "tryAttachFd(instance=$instanceName fd=$fd) -> $code")
+            if (code == 0) {
+                pendingInstanceName = instanceName
+                return true
+            }
+            Log.e(TAG, "tryAttachFd failed: ${NativeEasyTier.getLastError().orEmpty()}")
+            return false
+        }
     }
 }
