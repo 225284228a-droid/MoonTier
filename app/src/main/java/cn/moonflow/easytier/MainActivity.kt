@@ -308,12 +308,18 @@ private fun MoonTierApp(
     var dialog by remember { mutableStateOf<Pair<String, String>?>(null) }
     var rootAvailable by remember { mutableStateOf(false) }
     var rootChecking by remember { mutableStateOf(false) }
+    var rootSelectedConfigId by remember {
+        mutableStateOf(configs.firstOrNull { it.isDefault }?.id ?: configs.firstOrNull()?.id.orEmpty())
+    }
     val scope = rememberCoroutineScope()
     val palette = if (settings.darkMode) Palette.Dark else Palette.Light
     val runtime = controller.state
 
     fun reloadAll() {
         configs = store.loadConfigs()
+        if (configs.none { it.id == rootSelectedConfigId }) {
+            rootSelectedConfigId = configs.firstOrNull { it.isDefault }?.id ?: configs.firstOrNull()?.id.orEmpty()
+        }
         userServers = store.loadUserServers()
         officialServers = store.loadOfficialServers()
         settings = store.loadSettings()
@@ -442,6 +448,8 @@ private fun MoonTierApp(
                         rootAvailable = rootAvailable,
                         rootChecking = rootChecking,
                         rootMode = settings.rootModeEnabled,
+                        rootSelectedConfigId = rootSelectedConfigId,
+                        onRootConfigSelected = { rootSelectedConfigId = it },
                         onRefreshRoot = ::refreshRootStatus,
                         userServers = userServers,
                         officialServers = officialServers,
@@ -558,6 +566,8 @@ private fun MainTabs(
     rootAvailable: Boolean,
     rootChecking: Boolean,
     rootMode: Boolean,
+    rootSelectedConfigId: String,
+    onRootConfigSelected: (String) -> Unit,
     onRefreshRoot: () -> Unit,
     userServers: List<ServerEntry>,
     officialServers: List<ServerEntry>,
@@ -616,7 +626,7 @@ private fun MainTabs(
                 label = "tab"
             ) { index ->
                 when (index) {
-                    0 -> NetworkPage(palette, configs, runtime, nodesExpanded, onNodesExpandedChange, onStart, onStop, onEdit, rootController, rootAvailable, rootMode)
+                    0 -> NetworkPage(palette, configs, runtime, nodesExpanded, onNodesExpandedChange, onStart, onStop, onEdit, rootController, rootAvailable, rootMode, rootSelectedConfigId, onRootConfigSelected)
                     1 -> ProfilesPage(palette, configs, runtime, rootController, rootAvailable, rootMode, onStart, onStop, onEdit, onNewConfig, onImportToml, onDeleteConfig, onDefaultConfig, onExportConfig)
                     2 -> ServersPage(
                         palette = palette,
@@ -662,7 +672,9 @@ private fun NetworkPage(
     onEdit: (NetworkConfig) -> Unit,
     rootController: RootTierController,
     rootAvailable: Boolean,
-    rootMode: Boolean
+    rootMode: Boolean,
+    rootSelectedConfigId: String,
+    onRootConfigSelected: (String) -> Unit
 ) {
     if (rootMode) {
         RootNetworkPage(
@@ -670,6 +682,8 @@ private fun NetworkPage(
             configs = configs,
             rootController = rootController,
             rootAvailable = rootAvailable,
+            rootSelectedConfigId = rootSelectedConfigId,
+            onRootConfigSelected = onRootConfigSelected,
             onStart = { rootController.start(it) },
             onEdit = onEdit
         )
@@ -769,15 +783,19 @@ private fun RootNetworkPage(
     configs: List<NetworkConfig>,
     rootController: RootTierController,
     rootAvailable: Boolean,
+    rootSelectedConfigId: String,
+    onRootConfigSelected: (String) -> Unit,
     onStart: (NetworkConfig) -> Unit,
     onEdit: (NetworkConfig) -> Unit
 ) {
     val rootState = rootController.state
     val instances = rootState.instances.filter { it.running || it.starting || it.stopping }
     val defaultConfig = configs.firstOrNull { it.isDefault } ?: configs.firstOrNull() ?: NetworkConfig.defaultConfig()
-    var selectedConfigId by remember { mutableStateOf(defaultConfig.id) }
-    LaunchedEffect(configs, defaultConfig.id) {
-        if (configs.none { it.id == selectedConfigId }) selectedConfigId = defaultConfig.id
+    val selectedConfigId = configs.firstOrNull { it.id == rootSelectedConfigId }?.id ?: defaultConfig.id
+    LaunchedEffect(configs, rootSelectedConfigId, selectedConfigId) {
+        if (configs.isNotEmpty() && selectedConfigId != rootSelectedConfigId) {
+            onRootConfigSelected(selectedConfigId)
+        }
     }
     val current = configs.firstOrNull { it.id == selectedConfigId } ?: defaultConfig
     val selectedInstance = instances.firstOrNull { it.configId == current.id }
@@ -811,7 +829,7 @@ private fun RootNetworkPage(
                     selectedId = current.id,
                     runningIds = instances.map { it.configId }.toSet(),
                     palette = palette,
-                    onSelected = { selectedConfigId = it }
+                    onSelected = onRootConfigSelected
                 )
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
