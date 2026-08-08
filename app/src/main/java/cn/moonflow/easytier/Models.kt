@@ -227,7 +227,12 @@ data class AppSettings(
     val exitNodeAutoRoutes: Boolean = false,
     val darkMode: Boolean = false,
     val rootModeEnabled: Boolean = false,
-    val coreAutoUpdate: Boolean = true
+    val coreAutoUpdate: Boolean = true,
+    val configServerUrl: String = "",
+    val configServerHostname: String = "",
+    val configServerMachineId: String = "",
+    val configServerSecureMode: Boolean = true,
+    val configServerAutoConnect: Boolean = false
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("auto_sync_official_servers", autoSyncOfficialServers)
@@ -235,6 +240,11 @@ data class AppSettings(
         .put("dark_mode", darkMode)
         .put("root_mode_enabled", rootModeEnabled)
         .put("core_auto_update", coreAutoUpdate)
+        .put("config_server_url", configServerUrl)
+        .put("config_server_hostname", configServerHostname)
+        .put("config_server_machine_id", configServerMachineId)
+        .put("config_server_secure_mode", configServerSecureMode)
+        .put("config_server_auto_connect", configServerAutoConnect)
 
     companion object {
         fun fromJson(obj: JSONObject): AppSettings = AppSettings(
@@ -242,7 +252,12 @@ data class AppSettings(
             exitNodeAutoRoutes = obj.optBoolean("exit_node_auto_routes", false),
             darkMode = obj.optBoolean("dark_mode", false),
             rootModeEnabled = obj.optBoolean("root_mode_enabled", false),
-            coreAutoUpdate = obj.optBoolean("core_auto_update", true)
+            coreAutoUpdate = obj.optBoolean("core_auto_update", true),
+            configServerUrl = obj.optString("config_server_url", ""),
+            configServerHostname = obj.optString("config_server_hostname", ""),
+            configServerMachineId = obj.optString("config_server_machine_id", ""),
+            configServerSecureMode = obj.optBoolean("config_server_secure_mode", true),
+            configServerAutoConnect = obj.optBoolean("config_server_auto_connect", false)
         )
     }
 }
@@ -290,9 +305,29 @@ data class RootCoreState(
     val message: String = ""
 )
 
+data class RootManagedNetworkState(
+    val instanceId: String = "",
+    val instanceName: String = "",
+    val localCidr: String = "",
+    val nodes: List<NodeInfo> = emptyList()
+)
+
+data class RootConfigServerState(
+    val pid: Long = 0,
+    val running: Boolean = false,
+    val starting: Boolean = false,
+    val stopping: Boolean = false,
+    val connected: Boolean = false,
+    val serverUrl: String = "",
+    val managedNetworks: List<RootManagedNetworkState> = emptyList(),
+    val logs: List<String> = emptyList(),
+    val error: String = ""
+)
+
 data class RootTierState(
     val core: RootCoreState = RootCoreState(),
-    val instances: List<RootInstanceState> = emptyList()
+    val instances: List<RootInstanceState> = emptyList(),
+    val configServer: RootConfigServerState = RootConfigServerState()
 )
 
 fun List<String>.cleanItems(): List<String> =

@@ -15,13 +15,16 @@ class RootCoreManager(private val context: Context) {
     val coreDir = File(rootDir, "core")
     val coreFile = File(coreDir, "easytier-core")
     val cliFile = File(coreDir, "easytier-cli")
+    val managerClientFile = File(coreDir, "moontier-root-manager")
     private val versionFile = File(coreDir, "version.txt")
+    private val managerClientVersionFile = File(coreDir, "manager-client.version")
 
     fun ensureDirectories() {
         coreDir.mkdirs()
+        installBundledManagerClient()
     }
 
-    fun isReady(): Boolean = coreFile.isFile && cliFile.isFile
+    fun isReady(): Boolean = coreFile.isFile && cliFile.isFile && managerClientFile.isFile
 
     fun installedVersion(): String =
         runCatching { versionFile.readText().trim() }.getOrDefault("")
@@ -112,5 +115,32 @@ class RootCoreManager(private val context: Context) {
                 throw IllegalStateException("官方压缩包中缺少 easytier-core 或 easytier-cli")
             }
         }
+    }
+
+    private fun installBundledManagerClient() {
+        val currentVersion = runCatching { managerClientVersionFile.readText().trim() }.getOrDefault("")
+        if (managerClientFile.isFile && currentVersion == MANAGER_CLIENT_VERSION) {
+            managerClientFile.setExecutable(true, false)
+            return
+        }
+
+        val temp = File(coreDir, "${managerClientFile.name}.tmp")
+        context.assets.open("root/moontier-root-manager").use { input ->
+            temp.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (managerClientFile.exists() && !managerClientFile.delete()) {
+            temp.delete()
+            throw IllegalStateException("无法更新 Root 管理客户端")
+        }
+        if (!temp.renameTo(managerClientFile)) {
+            temp.delete()
+            throw IllegalStateException("无法安装 Root 管理客户端")
+        }
+        managerClientFile.setExecutable(true, false)
+        managerClientVersionFile.writeText(MANAGER_CLIENT_VERSION)
+    }
+
+    companion object {
+        private const val MANAGER_CLIENT_VERSION = "1"
     }
 }

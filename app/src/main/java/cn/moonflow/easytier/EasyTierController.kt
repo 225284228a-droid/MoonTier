@@ -3,7 +3,9 @@
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -40,15 +42,17 @@ class EasyTierController(
 
     fun start(config: NetworkConfig) {
         if (state.starting || state.stopping) return
+        Log.i(TAG, "FFI start requested id=${config.id} running=${state.running}")
         state = state.copy(starting = true, statusText = "正在启动 ${config.displayName}")
         scope.launch {
+            val startedAt = SystemClock.elapsedRealtime()
             val previousConfigId = state.runningConfigId
             if (state.running) stop(wait = true)
 
             val normalized = config
             val runtimeConfig = normalized.withRuntimeHostname(context)
             runningConfig = runtimeConfig
-            directCoreIps = withContext(Dispatchers.IO) { collectDirectCoreIps(runtimeConfig) }
+            directCoreIps = emptySet()
             vpnSignature = ""
             lastLogKey = ""
             missedPolls = 0
@@ -67,6 +71,7 @@ class EasyTierController(
                 failStart("启动失败: ${NativeEasyTier.getLastError().orEmpty()}")
                 return@launch
             }
+            Log.i(TAG, "FFI core ${runtimeConfig.id} started in ${SystemClock.elapsedRealtime() - startedAt}ms")
 
             state = state.copy(
                 running = true,
@@ -95,7 +100,7 @@ class EasyTierController(
             val outer = runCatching { JSONObject(raw) }.getOrNull() ?: return@launch
             val config = configs.firstOrNull { outer.optJSONObject(it.instanceName) != null } ?: return@launch
             runningConfig = config
-            directCoreIps = withContext(Dispatchers.IO) { collectDirectCoreIps(config) }
+            directCoreIps = emptySet()
             vpnSignature = ""
             lastLogKey = ""
             missedPolls = 0
@@ -186,7 +191,7 @@ class EasyTierController(
             while (true) {
                 val config = runningConfig ?: return@collectLatest
                 pollOnce(config)
-                delay(interval)
+                delay(if (state.localCidr.isBlank()) 500L else interval)
             }
         }
     }
@@ -228,10 +233,6 @@ class EasyTierController(
         state = next
         if (state.running && localCidr.isBlank() && nodes.isEmpty()) {
             stalledPolls++
-            if (stalledPolls >= 3) {
-                convergeMissingInstance("网络实例无响应")
-                return
-            }
         } else {
             stalledPolls = 0
         }
@@ -274,7 +275,8 @@ class EasyTierController(
 
     private suspend fun convergeMissingInstance(message: String) {
         missedPolls += 1
-        if (missedPolls < 2) return
+        val threshold = if (state.localCidr.isBlank()) 60 else 2
+        if (missedPolls < threshold) return
         val stoppedConfig = runningConfig
         val poll = pollJob
         pollJob = null
@@ -452,4 +454,7 @@ class EasyTierController(
         }
     }
 
+    companion object {
+        private const val TAG = "MoonTierCore"
+    }
 }

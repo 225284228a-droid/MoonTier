@@ -4,9 +4,9 @@ export PATH
 
 ACTION="$1"
 CORE="$2"
-CONFIG="$3"
-LOG="$4"
-PID_FILE="$5"
+LOG="$3"
+PID_FILE="$4"
+shift 4
 
 ensure_tun() {
     mkdir -p /dev/net
@@ -37,10 +37,10 @@ case "$ACTION" in
         fi
         rm -f "$PID_FILE"
         cd "$(dirname "$CORE")" || exit 1
-        nohup "$CORE" -c "$CONFIG" >"$LOG" 2>&1 &
+        nohup "$CORE" "$@" >"$LOG" 2>&1 &
         PID=$!
         echo "$PID" > "$PID_FILE"
-        sleep 2
+        sleep 1
         if kill -0 "$PID" 2>/dev/null; then
             echo "$PID"
             exit 0
@@ -58,7 +58,6 @@ case "$ACTION" in
             fi
             rm -f "$PID_FILE"
         fi
-        pkill -f "${CORE} -c" 2>/dev/null
         exit 0
         ;;
     status)

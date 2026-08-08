@@ -67,13 +67,27 @@ object RootManager {
     private fun runProcess(cmd: List<String>, timeoutMs: Long): ShellResult {
         return try {
             val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
+            val output = StringBuilder()
+            val reader = Thread({
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        synchronized(output) {
+                            if (output.isNotEmpty()) output.append('\n')
+                            output.append(line)
+                        }
+                    }
+                }
+            }, "MoonTier-root-output").apply {
+                isDaemon = true
+                start()
+            }
             val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
             if (!finished) {
                 process.destroyForcibly()
                 return ShellResult(-1, "命令执行超时", timedOut = true)
             }
-            val output = process.inputStream.bufferedReader().use { it.readText().trim() }
-            ShellResult(process.exitValue(), output)
+            reader.join(1000)
+            ShellResult(process.exitValue(), synchronized(output) { output.toString().trim() })
         } catch (e: Exception) {
             ShellResult(-1, e.message ?: "无法执行 root 命令")
         }

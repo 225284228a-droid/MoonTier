@@ -362,6 +362,26 @@ private fun MoonTierApp(
         }
     }
 
+    LaunchedEffect(
+        settings.rootModeEnabled,
+        settings.configServerAutoConnect,
+        settings.configServerUrl,
+        rootAvailable,
+        rootController.state.core.ready
+    ) {
+        if (
+            settings.rootModeEnabled &&
+            settings.configServerAutoConnect &&
+            settings.configServerUrl.isNotBlank() &&
+            rootAvailable &&
+            rootController.state.core.ready &&
+            !rootController.state.configServer.running &&
+            !rootController.state.configServer.starting
+        ) {
+            rootController.startConfigServer(settings)
+        }
+    }
+
     ApplySystemBars(palette, settings.darkMode)
 
     MaterialTheme(colorScheme = if (settings.darkMode) darkColorScheme() else lightColorScheme()) {
@@ -424,6 +444,8 @@ private fun MoonTierApp(
                         },
                         onImportToml = importToml,
                         onDeleteConfig = {
+                            if (settings.rootModeEnabled) rootController.stop(it.id)
+                            if (!settings.rootModeEnabled && runtime.runningConfigId == it.id) controller.stop()
                             store.deleteConfig(it.id)
                             reloadAll()
                         },
@@ -465,9 +487,17 @@ private fun MoonTierApp(
                                         dialog = "下载完成" to it.message
                                     }.onFailure {
                                         dialog = "下载失败" to (it.message ?: "无法下载服务器列表")
-                                    }
+                                }
                             }
                         },
+                        onConnectConfigServer = {
+                            if (settings.configServerUrl.isBlank()) {
+                                dialog = "网页控制台" to "请先填写用户名或配置服务器 URL"
+                            } else {
+                                rootController.startConfigServer(settings)
+                            }
+                        },
+                        onDisconnectConfigServer = { rootController.stopConfigServer() }
                     )
                 }
             }
@@ -530,7 +560,9 @@ private fun MainTabs(
     onAddOfficialServer: (ServerEntry) -> Unit,
     onSettings: (AppSettings) -> Unit,
     onSyncOfficial: () -> Unit,
-    onDownloadUsers: (String) -> Unit
+    onDownloadUsers: (String) -> Unit,
+    onConnectConfigServer: () -> Unit,
+    onDisconnectConfigServer: () -> Unit
 ) {
     val tabs = remember {
         listOf(
@@ -573,7 +605,22 @@ private fun MainTabs(
                 when (index) {
                     0 -> NetworkPage(palette, configs, runtime, nodesExpanded, onNodesExpandedChange, onStart, onStop, onEdit, rootController, rootAvailable, rootMode)
                     1 -> ProfilesPage(palette, configs, runtime, rootController, rootAvailable, rootMode, onStart, onStop, onEdit, onNewConfig, onImportToml, onDeleteConfig, onDefaultConfig, onExportConfig)
-                    2 -> ServersPage(palette, userServers, officialServers, onSaveUserServers, onAddOfficialServer, onDownloadUsers, onSyncOfficial)
+                    2 -> ServersPage(
+                        palette = palette,
+                        userServers = userServers,
+                        officialServers = officialServers,
+                        rootMode = rootMode,
+                        rootAvailable = rootAvailable,
+                        settings = settings,
+                        configServer = rootController.state.configServer,
+                        onSettings = onSettings,
+                        onConnectConfigServer = onConnectConfigServer,
+                        onDisconnectConfigServer = onDisconnectConfigServer,
+                        onSaveUserServers = onSaveUserServers,
+                        onAddOfficialServer = onAddOfficialServer,
+                        onDownloadUsers = onDownloadUsers,
+                        onSyncOfficial = onSyncOfficial
+                    )
                     else -> SettingsPage(
                         palette = palette,
                         settings = settings,
@@ -609,7 +656,7 @@ private fun NetworkPage(
             configs = configs,
             rootController = rootController,
             rootAvailable = rootAvailable,
-            onStart = onStart,
+            onStart = { rootController.start(it) },
             onEdit = onEdit
         )
         return
@@ -713,7 +760,13 @@ private fun RootNetworkPage(
 ) {
     val rootState = rootController.state
     val instances = rootState.instances.filter { it.running || it.starting || it.stopping }
-    val current = configs.firstOrNull { it.isDefault } ?: configs.firstOrNull() ?: NetworkConfig.defaultConfig()
+    val defaultConfig = configs.firstOrNull { it.isDefault } ?: configs.firstOrNull() ?: NetworkConfig.defaultConfig()
+    var selectedConfigId by remember { mutableStateOf(defaultConfig.id) }
+    LaunchedEffect(configs, defaultConfig.id) {
+        if (configs.none { it.id == selectedConfigId }) selectedConfigId = defaultConfig.id
+    }
+    val current = configs.firstOrNull { it.id == selectedConfigId } ?: defaultConfig
+    val selectedInstance = instances.firstOrNull { it.configId == current.id }
     val core = rootState.core
 
     LazyColumn(
@@ -750,6 +803,43 @@ private fun RootNetworkPage(
                         )
                     }
                 }
+                Spacer(Modifier.height(12.dp))
+                Text("当前配置", color = palette.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(6.dp))
+                RootConfigSelect(
+                    configs = configs,
+                    selectedId = current.id,
+                    runningIds = instances.map { it.configId }.toSet(),
+                    palette = palette,
+                    onSelected = { selectedConfigId = it }
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    QButton(
+                        text = when {
+                            selectedInstance?.starting == true -> "启动中"
+                            selectedInstance?.stopping == true -> "停止中"
+                            selectedInstance?.running == true -> "停止"
+                            else -> "启动"
+                        },
+                        palette = palette,
+                        modifier = Modifier.weight(1f),
+                        danger = selectedInstance != null,
+                        enabled = selectedInstance?.stopping != true && rootAvailable && core.ready,
+                        icon = if (selectedInstance != null) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
+                        onClick = {
+                            if (selectedInstance != null) rootController.stop(current.id) else onStart(current)
+                        }
+                    )
+                    QButton(
+                        text = "编辑",
+                        palette = palette,
+                        modifier = Modifier.weight(1f),
+                        primary = false,
+                        icon = Icons.Rounded.Edit,
+                        onClick = { onEdit(current) }
+                    )
+                }
                 if (!core.ready) {
                     Spacer(Modifier.height(10.dp))
                     Text(
@@ -762,33 +852,7 @@ private fun RootNetworkPage(
             }
         }
 
-        if (instances.isEmpty()) {
-            item {
-                QCard(palette) {
-                    Text(current.displayName, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Text(current.networkName.ifBlank { "尚未填写网络名称" }, color = palette.subText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        QButton(
-                            text = "启动",
-                            palette = palette,
-                            modifier = Modifier.weight(1f),
-                            enabled = rootAvailable && core.ready,
-                            icon = Icons.Rounded.PlayArrow,
-                            onClick = { onStart(current) }
-                        )
-                        QButton(
-                            text = "编辑",
-                            palette = palette,
-                            modifier = Modifier.weight(1f),
-                            primary = false,
-                            icon = Icons.Rounded.Edit,
-                            onClick = { onEdit(current) }
-                        )
-                    }
-                }
-            }
-        } else {
+        if (instances.isNotEmpty()) {
             items(instances, key = { it.configId }) { instance ->
                 QCard(palette) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -819,26 +883,144 @@ private fun RootNetworkPage(
                         Spacer(Modifier.height(8.dp))
                         Text(instance.error, color = palette.error, fontSize = 12.sp, lineHeight = 17.sp)
                     }
-                    if (instance.nodes.isNotEmpty()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text("${instance.nodes.size} 个设备", color = palette.subText, fontSize = 12.sp)
-                    }
-                    val preview = instance.logs.takeLast(4)
-                    if (preview.isNotEmpty()) {
-                        Spacer(Modifier.height(10.dp))
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(palette.surfaceVariant)
-                                .padding(10.dp)
-                        ) {
-                            preview.forEach { line ->
-                                Text(line, color = palette.subText, fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            }
+                    Spacer(Modifier.height(8.dp))
+                    var nodesExpanded by remember(instance.configId) { mutableStateOf(true) }
+                    NodeList(
+                        palette = palette,
+                        nodes = instance.nodes,
+                        expanded = nodesExpanded,
+                        onExpandedChange = { nodesExpanded = it }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    var logsExpanded by remember(instance.configId) { mutableStateOf(false) }
+                    LogSection(
+                        palette = palette,
+                        logs = instance.logs,
+                        expanded = logsExpanded,
+                        onExpandedChange = { logsExpanded = it }
+                    )
+                }
+            }
+        }
+
+        if (
+            rootState.configServer.running ||
+            rootState.configServer.starting ||
+            rootState.configServer.error.isNotBlank() ||
+            rootState.configServer.managedNetworks.isNotEmpty()
+        ) {
+            item {
+                QCard(palette) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("网页控制台", color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when {
+                                    rootState.configServer.connected -> "已连接 · ${rootState.configServer.managedNetworks.size} 个下发网络"
+                                    rootState.configServer.running -> "正在连接配置服务器"
+                                    rootState.configServer.starting -> "正在启动"
+                                    rootState.configServer.managedNetworks.isNotEmpty() -> "配置服务器已断开 · ${rootState.configServer.managedNetworks.size} 个缓存网络仍在运行"
+                                    else -> rootState.configServer.error
+                                },
+                                color = if (rootState.configServer.connected) palette.success else palette.subText,
+                                fontSize = 12.sp
+                            )
+                        }
+                        if (rootState.configServer.running || rootState.configServer.starting) {
+                            QButton(
+                                text = "断开",
+                                palette = palette,
+                                modifier = Modifier.width(86.dp),
+                                compact = true,
+                                danger = true,
+                                onClick = { rootController.stopConfigServer() }
+                            )
                         }
                     }
                 }
+            }
+            items(
+                rootState.configServer.managedNetworks,
+                key = { "managed-${it.instanceId}-${it.instanceName}" }
+            ) { network ->
+                QCard(palette) {
+                    Text(
+                        network.instanceName.ifBlank { network.instanceId.ifBlank { "下发网络" } },
+                        color = palette.text,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        if (network.localCidr.isBlank()) "等待虚拟 IP" else "已连接: ${network.localCidr}",
+                        color = palette.subText,
+                        fontSize = 12.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    var nodesExpanded by remember(network.instanceId, network.instanceName) { mutableStateOf(true) }
+                    NodeList(
+                        palette = palette,
+                        nodes = network.nodes,
+                        expanded = nodesExpanded,
+                        onExpandedChange = { nodesExpanded = it }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RootConfigSelect(
+    configs: List<NetworkConfig>,
+    selectedId: String,
+    runningIds: Set<String>,
+    palette: Palette,
+    onSelected: (String) -> Unit
+) {
+    var open by remember { mutableStateOf(false) }
+    val selected = configs.firstOrNull { it.id == selectedId }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(46.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(palette.surfaceVariant)
+            .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(8.dp))
+            .clickable { open = true }
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                selected?.displayName.orEmpty(),
+                color = palette.text,
+                fontSize = 14.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (selectedId in runningIds) {
+                Text("运行中", color = palette.success, fontSize = 12.sp)
+                Spacer(Modifier.width(8.dp))
+            }
+            Icon(Icons.Rounded.KeyboardArrowDown, null, tint = palette.subText)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            configs.forEach { config ->
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(config.displayName, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (config.id in runningIds) Text("运行中", color = palette.success, fontSize = 12.sp)
+                        }
+                    },
+                    onClick = {
+                        onSelected(config.id)
+                        open = false
+                    }
+                )
             }
         }
     }
@@ -851,67 +1033,87 @@ private fun RunningStatus(palette: Palette, runtime: RuntimeState, nodesExpanded
         Text(label, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Text(runtime.statusText, color = palette.subText, fontSize = 13.sp, modifier = Modifier.padding(top = 3.dp))
         Spacer(Modifier.height(14.dp))
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("设备列表", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Text(
-                    if (runtime.nodes.isEmpty()) "等待节点信息" else "${runtime.nodes.size} 个设备",
-                    color = palette.subText,
-                    fontSize = 12.sp
-                )
-            }
-            ExpandArrow(nodesExpanded, palette) { onNodesExpandedChange(!nodesExpanded) }
+        NodeList(palette, runtime.nodes, nodesExpanded, onNodesExpandedChange)
+        Spacer(Modifier.height(10.dp))
+        LogSection(palette, runtime.logs, logsExpanded) { logsExpanded = it }
+    }
+}
+
+@Composable
+private fun NodeList(
+    palette: Palette,
+    nodes: List<NodeInfo>,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("设备列表", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                if (nodes.isEmpty()) "等待节点信息" else "${nodes.size} 个设备",
+                color = palette.subText,
+                fontSize = 12.sp
+            )
         }
-        AnimatedVisibility(visible = nodesExpanded, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
-            Column {
-                if (runtime.nodes.isEmpty()) {
-                    Text("等待节点信息", color = palette.subText, fontSize = 13.sp, modifier = Modifier.padding(vertical = 6.dp))
-                } else {
-                    runtime.nodes.forEach { node ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            StatusDot(if (node.local) palette.subText else palette.subText)
-                            Spacer(Modifier.width(10.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(node.hostname, color = palette.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("${node.ip} · ${node.role}", color = palette.subText, fontSize = 12.sp, maxLines = 1)
-                            }
-                            if (node.latencyMs >= 0) Text("${node.latencyMs} ms", color = palette.subText, fontSize = 12.sp)
+        ExpandArrow(expanded, palette) { onExpandedChange(!expanded) }
+    }
+    AnimatedVisibility(visible = expanded, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
+        Column {
+            if (nodes.isEmpty()) {
+                Text("等待节点信息", color = palette.subText, fontSize = 13.sp, modifier = Modifier.padding(vertical = 6.dp))
+            } else {
+                nodes.forEach { node ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        StatusDot(if (node.local) palette.success else palette.subText)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(node.hostname, color = palette.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${node.ip} · ${node.role}", color = palette.subText, fontSize = 12.sp, maxLines = 1)
                         }
+                        if (node.latencyMs >= 0) Text("${node.latencyMs} ms", color = palette.subText, fontSize = 12.sp)
                     }
                 }
             }
         }
-        Spacer(Modifier.height(10.dp))
-        Row(
+    }
+}
+
+@Composable
+private fun LogSection(
+    palette: Palette,
+    logs: List<String>,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("运行日志", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+        ExpandArrow(expanded, palette) { onExpandedChange(!expanded) }
+    }
+    AnimatedVisibility(visible = expanded, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surfaceVariant)
+                .padding(10.dp)
         ) {
-            Text("运行日志", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            ExpandArrow(logsExpanded, palette) { logsExpanded = !logsExpanded }
-        }
-        AnimatedVisibility(visible = logsExpanded, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(palette.surfaceVariant)
-                    .padding(10.dp)
-            ) {
-                runtime.logs.takeLast(18).ifEmpty { listOf("暂无日志") }.forEach {
-                    Text(it, color = palette.subText, fontSize = 12.sp, lineHeight = 17.sp)
-                }
+            logs.takeLast(18).ifEmpty { listOf("暂无日志") }.forEach {
+                Text(it, color = palette.subText, fontSize = 12.sp, lineHeight = 17.sp)
             }
         }
     }
@@ -1047,6 +1249,13 @@ private fun ServersPage(
     palette: Palette,
     userServers: List<ServerEntry>,
     officialServers: List<ServerEntry>,
+    rootMode: Boolean,
+    rootAvailable: Boolean,
+    settings: AppSettings,
+    configServer: RootConfigServerState,
+    onSettings: (AppSettings) -> Unit,
+    onConnectConfigServer: () -> Unit,
+    onDisconnectConfigServer: () -> Unit,
     onSaveUserServers: (List<ServerEntry>) -> Unit,
     onAddOfficialServer: (ServerEntry) -> Unit,
     onDownloadUsers: (String) -> Unit,
@@ -1054,6 +1263,7 @@ private fun ServersPage(
 ) {
     var favoriteOpen by remember { mutableStateOf(false) }
     var officialOpen by remember { mutableStateOf(false) }
+    var consoleLogsOpen by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf("") }
 
     LazyColumn(
@@ -1064,7 +1274,129 @@ private fun ServersPage(
         contentPadding = PaddingValues(top = 14.dp, bottom = 26.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { Header("服务器", "用户收藏和官方源分开管理", palette) }
+        item {
+            Header(
+                "服务器",
+                if (rootMode) "网页控制台、用户收藏与官方源" else "用户收藏和官方源分开管理",
+                palette
+            )
+        }
+        if (rootMode) {
+            item {
+                QCard(palette) {
+                    val statusText = when {
+                        !rootAvailable -> "Root 不可用"
+                        configServer.stopping -> "正在断开"
+                        configServer.starting -> "正在启动"
+                        configServer.connected -> "已连接"
+                        configServer.running -> "正在连接"
+                        configServer.error.isNotBlank() -> "连接失败"
+                        else -> "未连接"
+                    }
+                    val statusColor = when {
+                        configServer.connected -> palette.success
+                        configServer.error.isNotBlank() || !rootAvailable -> palette.error
+                        else -> palette.subText
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("网页控制台", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                            Text(
+                                if (configServer.managedNetworks.isEmpty()) statusText else "$statusText · ${configServer.managedNetworks.size} 个下发网络",
+                                color = statusColor,
+                                fontSize = 12.sp
+                            )
+                        }
+                        StatusDot(statusColor)
+                    }
+                    FieldBlock("用户名或配置服务器 URL", palette) {
+                        QTextField(
+                            value = settings.configServerUrl,
+                            placeholder = "例如 admin 或 udp://host:22020/admin",
+                            palette = palette,
+                            onValueChange = { onSettings(settings.copy(configServerUrl = it)) }
+                        )
+                    }
+                    FieldBlock("主机名", palette) {
+                        QTextField(
+                            value = settings.configServerHostname,
+                            placeholder = "留空时使用设备名",
+                            palette = palette,
+                            onValueChange = { onSettings(settings.copy(configServerHostname = it)) }
+                        )
+                    }
+                    FieldBlock("机器 ID", palette) {
+                        QTextField(
+                            value = settings.configServerMachineId,
+                            placeholder = "留空时使用 Android 设备 ID",
+                            palette = palette,
+                            onValueChange = { onSettings(settings.copy(configServerMachineId = it)) }
+                        )
+                    }
+                    SwitchRow("Secure Mode", settings.configServerSecureMode, palette) {
+                        onSettings(settings.copy(configServerSecureMode = it))
+                    }
+                    SwitchRow("启动时自动连接", settings.configServerAutoConnect, palette) {
+                        onSettings(settings.copy(configServerAutoConnect = it))
+                    }
+                    if (configServer.error.isNotBlank()) {
+                        Text(configServer.error, color = palette.error, fontSize = 12.sp, lineHeight = 18.sp)
+                    }
+                    if (configServer.managedNetworks.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        configServer.managedNetworks.forEach { network ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                StatusDot(palette.success)
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        network.instanceName.ifBlank { network.instanceId.ifBlank { "下发网络" } },
+                                        color = palette.text,
+                                        fontSize = 13.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(network.localCidr.ifBlank { "等待虚拟 IP" }, color = palette.subText, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        QButton(
+                            text = if (configServer.starting) "启动中" else "连接",
+                            palette = palette,
+                            modifier = Modifier.weight(1f),
+                            enabled = rootAvailable && !configServer.running && !configServer.starting && !configServer.stopping && settings.configServerUrl.isNotBlank(),
+                            onClick = onConnectConfigServer
+                        )
+                        QButton(
+                            text = if (configServer.stopping) "断开中" else "断开",
+                            palette = palette,
+                            modifier = Modifier.weight(1f),
+                            primary = false,
+                            dangerText = true,
+                            enabled = configServer.running || configServer.starting,
+                            onClick = onDisconnectConfigServer
+                        )
+                    }
+                    if (configServer.logs.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        LogSection(
+                            palette = palette,
+                            logs = configServer.logs,
+                            expanded = consoleLogsOpen,
+                            onExpandedChange = { consoleLogsOpen = it }
+                        )
+                    }
+                }
+            }
+        }
         item {
             QCard(palette) {
                 Row(

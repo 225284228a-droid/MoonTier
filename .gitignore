@@ -5,6 +5,7 @@ build/
 */build/
 .cxx/
 .externalNativeBuild/
+tools/**/target/
 
 # Local IDE and machine state
 local.properties

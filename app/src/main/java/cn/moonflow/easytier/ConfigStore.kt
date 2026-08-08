@@ -104,7 +104,12 @@ class ConfigStore(private val context: Context) {
             exitNodeAutoRoutes = settings.exitNodeAutoRoutes,
             darkMode = settings.darkMode,
             rootModeEnabled = settings.rootModeEnabled,
-            coreAutoUpdate = settings.coreAutoUpdate
+            coreAutoUpdate = settings.coreAutoUpdate,
+            configServerUrl = settings.configServerUrl,
+            configServerHostname = settings.configServerHostname,
+            configServerMachineId = settings.configServerMachineId,
+            configServerSecureMode = settings.configServerSecureMode,
+            configServerAutoConnect = settings.configServerAutoConnect
         )
         writeTextAtomic(settingsFile, merged.toJson().toString(2))
     }
