@@ -21,7 +21,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.net.URLEncoder
 
 class RootTierController(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -369,7 +368,9 @@ class RootTierController(private val context: Context) {
     private fun startConfigServerBlocking(settings: AppSettings): RefreshedState {
         requireRootAndCore()
         val rawUrl = settings.configServerUrl.trim()
-        require(rawUrl.isNotBlank()) { "请先填写配置服务器用户名或 URL" }
+        require(isFullConfigServerUrl(rawUrl)) {
+            "请填写完整配置服务器 URL，例如 udp://host:22020/admin"
+        }
         val desired = optionsFromSettings(settings, enabled = true)
         restartManagerForOptions(desired)
         return refreshedState(queryManagerSnapshot(), desired)
@@ -905,9 +906,11 @@ class RootTierController(private val context: Context) {
 
     private fun loadManagerOptions(): ManagerOptions? {
         val obj = runCatching { JSONObject(managerMetaFile.readText()) }.getOrNull() ?: return null
+        val rawUrl = obj.optString("raw_config_server_url")
         return ManagerOptions(
-            configServerEnabled = obj.optBoolean("config_server_enabled", false),
-            rawConfigServerUrl = obj.optString("raw_config_server_url"),
+            configServerEnabled = obj.optBoolean("config_server_enabled", false) &&
+                isFullConfigServerUrl(rawUrl),
+            rawConfigServerUrl = rawUrl,
             resolvedConfigServerUrl = obj.optString("resolved_config_server_url"),
             hostname = obj.optString("hostname"),
             machineId = obj.optString("machine_id"),
@@ -939,7 +942,7 @@ class RootTierController(private val context: Context) {
                 .ifBlank { "moontier-${Build.DEVICE}" }
         }
         return ManagerOptions(
-            configServerEnabled = enabled && settings.configServerUrl.isNotBlank(),
+            configServerEnabled = enabled && isFullConfigServerUrl(settings.configServerUrl),
             rawConfigServerUrl = settings.configServerUrl.trim(),
             hostname = hostname,
             machineId = machineId,
@@ -1039,12 +1042,11 @@ class RootTierController(private val context: Context) {
     }
 
     private fun resolveConfigServerEndpoint(raw: String, store: ConfigStore): String {
-        val expanded = if (raw.contains("://")) {
-            raw
-        } else {
-            val token = URLEncoder.encode(raw, Charsets.UTF_8.name()).replace("+", "%20")
-            "udp://config-server.easytier.cn:22020/$token"
+        val trimmed = raw.trim()
+        if (!isFullConfigServerUrl(trimmed)) {
+            throw IllegalArgumentException("请填写完整配置服务器 URL，例如 udp://host:22020/admin")
         }
+        val expanded = trimmed
         val scheme = expanded.substringBefore("://", "").lowercase()
         if (scheme == "ws" || scheme == "wss") return expanded
         val host = Ipv4.hostFromUrl(expanded)
@@ -1053,6 +1055,9 @@ class RootTierController(private val context: Context) {
             ?: return expanded
         return replaceEndpointHost(expanded, host, address)
     }
+
+    private fun isFullConfigServerUrl(value: String): Boolean =
+        value.trim().contains("://")
 
     private fun safeId(id: String): String =
         id.replace(Regex("[^A-Za-z0-9_-]"), "_").take(64).ifBlank { "config" }

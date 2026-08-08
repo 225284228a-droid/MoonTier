@@ -237,6 +237,9 @@ private data class ServerPickerState(
     val servers: List<ServerEntry>
 )
 
+private fun isFullConfigServerUrl(value: String): Boolean =
+    value.trim().contains("://")
+
 private data class Palette(
     val background: Color,
     val surface: Color,
@@ -372,7 +375,7 @@ private fun MoonTierApp(
         if (
             settings.rootModeEnabled &&
             settings.configServerAutoConnect &&
-            settings.configServerUrl.isNotBlank() &&
+            isFullConfigServerUrl(settings.configServerUrl) &&
             rootAvailable &&
             rootController.state.core.ready &&
             !rootController.state.configServer.running &&
@@ -491,8 +494,8 @@ private fun MoonTierApp(
                             }
                         },
                         onConnectConfigServer = {
-                            if (settings.configServerUrl.isBlank()) {
-                                dialog = "网页控制台" to "请先填写用户名或配置服务器 URL"
+                            if (!isFullConfigServerUrl(settings.configServerUrl)) {
+                                dialog = "网页控制台" to "请填写完整配置服务器 URL，例如 udp://host:22020/admin"
                             } else {
                                 rootController.startConfigServer(settings)
                             }
@@ -1007,23 +1010,119 @@ private fun RootConfigSelect(
             }
             Icon(Icons.Rounded.KeyboardArrowDown, null, tint = palette.subText)
         }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            configs.forEach { config ->
-                DropdownMenuItem(
-                    text = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(config.displayName, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (config.id in runningIds) Text("运行中", color = palette.success, fontSize = 12.sp)
-                        }
-                    },
-                    onClick = {
-                        onSelected(config.id)
-                        open = false
-                    }
-                )
-            }
-        }
     }
+    if (open) {
+        ConfigPickerDialog(
+            configs = configs,
+            selectedId = selectedId,
+            runningIds = runningIds,
+            palette = palette,
+            onDismiss = { open = false },
+            onSelected = onSelected
+        )
+    }
+}
+
+@Composable
+private fun ConfigPickerDialog(
+    configs: List<NetworkConfig>,
+    selectedId: String,
+    runningIds: Set<String>,
+    palette: Palette,
+    onDismiss: () -> Unit,
+    onSelected: (String) -> Unit
+) {
+    var pending by remember(selectedId) { mutableStateOf(selectedId) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("选择配置", color = palette.text, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+        },
+        text = {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .animateContentSize(tween(180))
+            ) {
+                if (configs.isEmpty()) {
+                    Text("暂无可选配置", color = palette.subText, fontSize = 14.sp)
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 380.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(configs, key = { it.id }) { config ->
+                            val checked = config.id == pending
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(13.dp))
+                                    .background(
+                                        if (checked) palette.accent.copy(alpha = 0.10f)
+                                        else palette.surfaceVariant
+                                    )
+                                    .border(
+                                        BorderStroke(
+                                            0.7.dp,
+                                            if (checked) palette.accent.copy(alpha = 0.45f) else palette.border
+                                        ),
+                                        RoundedCornerShape(13.dp)
+                                    )
+                                    .clickable { pending = config.id }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        config.displayName,
+                                        color = palette.text,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        if (config.id in runningIds) {
+                                            "${config.networkName.ifBlank { "未填写网络名称" }} · 运行中"
+                                        } else {
+                                            config.networkName.ifBlank { "未填写网络名称" }
+                                        },
+                                        color = if (config.id in runningIds) palette.success else palette.subText,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (checked) {
+                                    Spacer(Modifier.width(10.dp))
+                                    Icon(Icons.Rounded.Check, null, tint = palette.accent)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            QButton(
+                "选择",
+                palette,
+                Modifier.width(96.dp),
+                compact = true,
+                enabled = configs.any { it.id == pending }
+            ) {
+                onSelected(pending)
+                onDismiss()
+            }
+        },
+        dismissButton = {
+            QButton("取消", palette, Modifier.width(82.dp), primary = false, compact = true, onClick = onDismiss)
+        },
+        containerColor = palette.surface,
+        shape = RoundedCornerShape(22.dp)
+    )
 }
 
 @Composable
@@ -1263,6 +1362,7 @@ private fun ServersPage(
 ) {
     var favoriteOpen by remember { mutableStateOf(false) }
     var officialOpen by remember { mutableStateOf(false) }
+    var consoleOpen by remember { mutableStateOf(false) }
     var consoleLogsOpen by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf("") }
 
@@ -1298,7 +1398,12 @@ private fun ServersPage(
                         configServer.error.isNotBlank() || !rootAvailable -> palette.error
                         else -> palette.subText
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Column(Modifier.weight(1f)) {
                             Text("网页控制台", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                             Text(
@@ -1308,91 +1413,101 @@ private fun ServersPage(
                             )
                         }
                         StatusDot(statusColor)
+                        Spacer(Modifier.width(8.dp))
+                        ExpandArrow(consoleOpen, palette) { consoleOpen = !consoleOpen }
                     }
-                    FieldBlock("用户名或配置服务器 URL", palette) {
-                        QTextField(
-                            value = settings.configServerUrl,
-                            placeholder = "例如 admin 或 udp://host:22020/admin",
-                            palette = palette,
-                            onValueChange = { onSettings(settings.copy(configServerUrl = it)) }
-                        )
-                    }
-                    FieldBlock("主机名", palette) {
-                        QTextField(
-                            value = settings.configServerHostname,
-                            placeholder = "留空时使用设备名",
-                            palette = palette,
-                            onValueChange = { onSettings(settings.copy(configServerHostname = it)) }
-                        )
-                    }
-                    FieldBlock("机器 ID", palette) {
-                        QTextField(
-                            value = settings.configServerMachineId,
-                            placeholder = "留空时使用 Android 设备 ID",
-                            palette = palette,
-                            onValueChange = { onSettings(settings.copy(configServerMachineId = it)) }
-                        )
-                    }
-                    SwitchRow("Secure Mode", settings.configServerSecureMode, palette) {
-                        onSettings(settings.copy(configServerSecureMode = it))
-                    }
-                    SwitchRow("启动时自动连接", settings.configServerAutoConnect, palette) {
-                        onSettings(settings.copy(configServerAutoConnect = it))
-                    }
-                    if (configServer.error.isNotBlank()) {
-                        Text(configServer.error, color = palette.error, fontSize = 12.sp, lineHeight = 18.sp)
-                    }
-                    if (configServer.managedNetworks.isNotEmpty()) {
-                        Spacer(Modifier.height(8.dp))
-                        configServer.managedNetworks.forEach { network ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                StatusDot(palette.success)
-                                Spacer(Modifier.width(10.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        network.instanceName.ifBlank { network.instanceId.ifBlank { "下发网络" } },
-                                        color = palette.text,
-                                        fontSize = 13.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(network.localCidr.ifBlank { "等待虚拟 IP" }, color = palette.subText, fontSize = 12.sp)
+                    AnimatedVisibility(
+                        visible = consoleOpen,
+                        enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(160)),
+                        exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(120))
+                    ) {
+                        Column(Modifier.padding(top = 10.dp)) {
+                            FieldBlock("完整配置服务器 URL", palette) {
+                                QTextField(
+                                    value = settings.configServerUrl,
+                                    placeholder = "udp://host:22020/admin",
+                                    palette = palette,
+                                    onValueChange = { onSettings(settings.copy(configServerUrl = it)) }
+                                )
+                            }
+                            FieldBlock("主机名", palette) {
+                                QTextField(
+                                    value = settings.configServerHostname,
+                                    placeholder = "留空时使用设备名",
+                                    palette = palette,
+                                    onValueChange = { onSettings(settings.copy(configServerHostname = it)) }
+                                )
+                            }
+                            FieldBlock("机器 ID", palette) {
+                                QTextField(
+                                    value = settings.configServerMachineId,
+                                    placeholder = "留空时使用 Android 设备 ID",
+                                    palette = palette,
+                                    onValueChange = { onSettings(settings.copy(configServerMachineId = it)) }
+                                )
+                            }
+                            SwitchRow("配置服务器加密（Secure Mode）", settings.configServerSecureMode, palette) {
+                                onSettings(settings.copy(configServerSecureMode = it))
+                            }
+                            SwitchRow("启动时自动连接", settings.configServerAutoConnect, palette) {
+                                onSettings(settings.copy(configServerAutoConnect = it))
+                            }
+                            if (configServer.error.isNotBlank()) {
+                                Text(configServer.error, color = palette.error, fontSize = 12.sp, lineHeight = 18.sp)
+                            }
+                            if (configServer.managedNetworks.isNotEmpty()) {
+                                Spacer(Modifier.height(8.dp))
+                                configServer.managedNetworks.forEach { network ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        StatusDot(palette.success)
+                                        Spacer(Modifier.width(10.dp))
+                                        Column(Modifier.weight(1f)) {
+                                            Text(
+                                                network.instanceName.ifBlank { network.instanceId.ifBlank { "下发网络" } },
+                                                color = palette.text,
+                                                fontSize = 13.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(network.localCidr.ifBlank { "等待虚拟 IP" }, color = palette.subText, fontSize = 12.sp)
+                                        }
+                                    }
                                 }
                             }
+                            Spacer(Modifier.height(10.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                QButton(
+                                    text = if (configServer.starting) "启动中" else "连接",
+                                    palette = palette,
+                                    modifier = Modifier.weight(1f),
+                                    enabled = rootAvailable && !configServer.running && !configServer.starting && !configServer.stopping && isFullConfigServerUrl(settings.configServerUrl),
+                                    onClick = onConnectConfigServer
+                                )
+                                QButton(
+                                    text = if (configServer.stopping) "断开中" else "断开",
+                                    palette = palette,
+                                    modifier = Modifier.weight(1f),
+                                    primary = false,
+                                    dangerText = true,
+                                    enabled = configServer.running || configServer.starting,
+                                    onClick = onDisconnectConfigServer
+                                )
+                            }
+                            if (configServer.logs.isNotEmpty()) {
+                                Spacer(Modifier.height(8.dp))
+                                LogSection(
+                                    palette = palette,
+                                    logs = configServer.logs,
+                                    expanded = consoleLogsOpen,
+                                    onExpandedChange = { consoleLogsOpen = it }
+                                )
+                            }
                         }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        QButton(
-                            text = if (configServer.starting) "启动中" else "连接",
-                            palette = palette,
-                            modifier = Modifier.weight(1f),
-                            enabled = rootAvailable && !configServer.running && !configServer.starting && !configServer.stopping && settings.configServerUrl.isNotBlank(),
-                            onClick = onConnectConfigServer
-                        )
-                        QButton(
-                            text = if (configServer.stopping) "断开中" else "断开",
-                            palette = palette,
-                            modifier = Modifier.weight(1f),
-                            primary = false,
-                            dangerText = true,
-                            enabled = configServer.running || configServer.starting,
-                            onClick = onDisconnectConfigServer
-                        )
-                    }
-                    if (configServer.logs.isNotEmpty()) {
-                        Spacer(Modifier.height(8.dp))
-                        LogSection(
-                            palette = palette,
-                            logs = configServer.logs,
-                            expanded = consoleLogsOpen,
-                            onExpandedChange = { consoleLogsOpen = it }
-                        )
                     }
                 }
             }
