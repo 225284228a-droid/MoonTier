@@ -1675,11 +1675,12 @@ private fun SettingsPage(
                 }
             }
         }
-        item {
-            QCard(palette) {
-                Text("Root 官方核心", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (settings.rootModeEnabled) {
+            item {
+                QCard(palette) {
+                    Text("下载核心", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     StatusDot(if (core.ready) palette.success else palette.subText)
                     Text(
                         if (core.ready) "已安装 ${core.installedVersion}" else "尚未安装",
@@ -1687,25 +1688,25 @@ private fun SettingsPage(
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
-                }
-                if (core.latestVersion.isNotBlank()) {
+                    }
+                    if (core.latestVersion.isNotBlank()) {
                     Spacer(Modifier.height(4.dp))
                     Text(
                         "最新官方版本: ${core.latestVersion}",
                         color = palette.subText,
                         fontSize = 12.sp,
                     )
-                }
-                if (core.installing) {
+                    }
+                    if (core.installing) {
                     Spacer(Modifier.height(8.dp))
                     Text("正在下载 ${core.progress}%", color = palette.text, fontSize = 13.sp)
-                }
-                if (core.message.isNotBlank()) {
+                    }
+                    if (core.message.isNotBlank()) {
                     Spacer(Modifier.height(8.dp))
                     Text(core.message, color = palette.subText, fontSize = 12.sp, lineHeight = 18.sp)
-                }
-                Spacer(Modifier.height(12.dp))
-                ActionBar(palette) {
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    ActionBar(palette) {
                     QButton(
                         text = if (core.checking) "检查中" else "检查更新",
                         palette = palette,
@@ -1726,17 +1727,18 @@ private fun SettingsPage(
                         icon = Icons.Rounded.Download,
                         onClick = { rootController.installCore() }
                     )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    SwitchRow("Root 模式自动检查更新", settings.coreAutoUpdate, palette) {
+                        onSettings(settings.copy(coreAutoUpdate = it))
+                    }
+                    Text(
+                        "Root 模式直接运行官方发布的 aarch64 easytier-core，可单独更新，不依赖 FFI。",
+                        color = palette.subText,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
                 }
-                Spacer(Modifier.height(8.dp))
-                SwitchRow("Root 模式自动检查更新", settings.coreAutoUpdate, palette) {
-                    onSettings(settings.copy(coreAutoUpdate = it))
-                }
-                Text(
-                    "Root 模式直接运行官方发布的 aarch64 easytier-core，可单独更新，不依赖 FFI。",
-                    color = palette.subText,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp
-                )
             }
         }
     }

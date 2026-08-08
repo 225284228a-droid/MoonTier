@@ -2,6 +2,8 @@ package cn.moonflow.easytier
 
 object Ipv4 {
 
+    private val addressLiteralPattern = Regex("""(?<![0-9.])(\d{1,3}(?:\.\d{1,3}){3})(?![0-9.])""")
+
     fun intToAddress(value: Long): String {
         val v = value and 0xFFFFFFFFL
         return "${(v ushr 24) and 255}.${(v ushr 16) and 255}.${(v ushr 8) and 255}.${v and 255}"
@@ -27,6 +29,12 @@ object Ipv4 {
             .substringBeforeLast(":", trimmed)
             .trim('[', ']')
     }
+
+    fun addressLiterals(value: String): Set<String> =
+        addressLiteralPattern.findAll(value)
+            .map { it.groupValues[1] }
+            .filter { parseAddress(it) != null }
+            .toCollection(LinkedHashSet())
 
     fun cidrToRange(cidr: String): LongRange? {
         val parts = cidr.split("/")

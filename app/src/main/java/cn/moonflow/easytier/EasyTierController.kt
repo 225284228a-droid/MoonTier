@@ -241,12 +241,21 @@ class EasyTierController(
             if (directCoreIps.isEmpty()) {
                 directCoreIps = withContext(Dispatchers.IO) { collectDirectCoreIps(config) }
             }
+            val overlayRange = Ipv4.cidrToRange(localCidr)
+            val discoveredCoreIps = collectDynamicCoreIps(info).filterNot { ip ->
+                Ipv4.parseAddress(ip)?.let { address -> overlayRange?.contains(address) == true } == true
+            }.toSet()
+            if (discoveredCoreIps.isNotEmpty()) {
+                directCoreIps = (directCoreIps + discoveredCoreIps).take(MAX_EXCLUDED_CORE_IPS).toSet()
+            }
             val settings = store.loadSettings()
             val configuredExitNodes = config.exitNodes.cleanItems()
             val reachableExitNodes = configuredExitNodes.filter {
                 normalizeExitNode(it) in collectRouteIps(info)
             }
-            val exitNodeRoutesActive = settings.exitNodeAutoRoutes && reachableExitNodes.isNotEmpty()
+            val exitNodeRoutesActive = settings.exitNodeAutoRoutes &&
+                reachableExitNodes.isNotEmpty() &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
             val vpnJson = buildVpnConfigJson(
                 config = config,
                 cidr = localCidr,
@@ -261,6 +270,7 @@ class EasyTierController(
                 val routeCount = runCatching { JSONObject(vpnJson).optJSONArray("routes")?.length() ?: 0 }.getOrDefault(0)
                 val exitRouteState = when {
                     exitNodeRoutesActive -> "出口节点自动路由已开启，可达 ${reachableExitNodes.size}/${configuredExitNodes.size}"
+                    settings.exitNodeAutoRoutes && reachableExitNodes.isNotEmpty() -> "当前 Android 版本无法排除核心传输端点，未下发公网路由"
                     settings.exitNodeAutoRoutes && configuredExitNodes.isNotEmpty() -> "出口节点未可达，暂不下发公网路由"
                     configuredExitNodes.isNotEmpty() -> "出口节点已配置，自动路由未开启"
                     else -> "未配置出口节点"
@@ -330,6 +340,38 @@ class EasyTierController(
             }
         }
         return out.take(32).toSet()
+    }
+
+    private fun collectDynamicCoreIps(info: JSONObject): Set<String> {
+        val out = LinkedHashSet<String>()
+
+        fun addAddresses(value: String) {
+            out += Ipv4.addressLiterals(value)
+        }
+
+        fun visit(value: Any?, key: String = "", depth: Int = 0) {
+            if (depth > 8) return
+            when (value) {
+                is JSONObject -> value.keys().forEach { childKey ->
+                    visit(value.opt(childKey), childKey, depth + 1)
+                }
+                is JSONArray -> {
+                    for (index in 0 until value.length()) visit(value.opt(index), key, depth + 1)
+                }
+                is String -> if (TRANSPORT_ENDPOINT_KEY.containsMatchIn(key)) addAddresses(value)
+            }
+        }
+
+        // Connection snapshots expose remote/resolved endpoints after peer discovery.
+        visit(info)
+
+        // Hole-punch candidates are also emitted as events before a connection is established.
+        val events = info.optJSONArray("events") ?: JSONArray()
+        for (index in 0 until events.length()) {
+            val event = events.optString(index)
+            if (P2P_EVENT_HINT.containsMatchIn(event)) addAddresses(event)
+        }
+        return out.take(MAX_EXCLUDED_CORE_IPS).toSet()
     }
 
     private fun collectRouteIps(info: JSONObject): Set<String> {
@@ -456,5 +498,14 @@ class EasyTierController(
 
     companion object {
         private const val TAG = "MoonTierCore"
+        private const val MAX_EXCLUDED_CORE_IPS = 64
+        private val TRANSPORT_ENDPOINT_KEY = Regex(
+            "(?:remote|resolved|endpoint|stun|mapped|public).*?(?:addr|address|url|endpoint)?$",
+            RegexOption.IGNORE_CASE
+        )
+        private val P2P_EVENT_HINT = Regex(
+            "hole.?punch|direct connect|udp|tcp|quic|stun|endpoint|candidate",
+            RegexOption.IGNORE_CASE
+        )
     }
 }
