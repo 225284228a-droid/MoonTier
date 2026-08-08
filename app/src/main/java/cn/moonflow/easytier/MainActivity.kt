@@ -107,6 +107,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -115,8 +116,11 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -783,30 +787,16 @@ private fun RootNetworkPage(
         item {
             Header(
                 title = "Root 模式",
-                subtitle = if (rootAvailable) "可同时运行多个网络" else "未检测到 root，请在 KernelSU 中授权",
+                subtitle = if (rootAvailable) {
+                    "可用 · 核心 ${core.installedVersion.ifBlank { "未安装" }}"
+                } else {
+                    "未检测到 root，请在 KernelSU 中授权"
+                },
                 palette = palette
             )
         }
         item {
             QCard(palette) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusDot(if (rootAvailable) palette.success else palette.error)
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            if (rootAvailable) "Root 可用" else "Root 不可用",
-                            color = palette.text,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            if (core.ready) "核心 ${core.installedVersion.ifBlank { "已安装" }}" else "尚未下载官方核心",
-                            color = palette.subText,
-                            fontSize = 12.sp
-                        )
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
                 Text("当前配置", color = palette.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(6.dp))
                 RootConfigSelect(
@@ -984,145 +974,112 @@ private fun RootConfigSelect(
 ) {
     var open by remember { mutableStateOf(false) }
     val selected = configs.firstOrNull { it.id == selectedId }
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .height(46.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(palette.surfaceVariant)
-            .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(8.dp))
-            .clickable { open = true }
-            .padding(horizontal = 14.dp),
-        contentAlignment = Alignment.CenterStart
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                selected?.displayName.orEmpty(),
-                color = palette.text,
-                fontSize = 14.sp,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (selectedId in runningIds) {
-                Text("运行中", color = palette.success, fontSize = 12.sp)
-                Spacer(Modifier.width(8.dp))
+        val menuWidth = maxWidth
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surfaceVariant)
+                .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(8.dp))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { open = true }
+                .padding(horizontal = 14.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    selected?.displayName.orEmpty(),
+                    color = palette.text,
+                    fontSize = 14.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (selectedId in runningIds) {
+                    Text("运行中", color = palette.success, fontSize = 12.sp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Icon(Icons.Rounded.KeyboardArrowDown, null, tint = palette.subText)
             }
-            Icon(Icons.Rounded.KeyboardArrowDown, null, tint = palette.subText)
         }
-    }
-    if (open) {
-        ConfigPickerDialog(
-            configs = configs,
-            selectedId = selectedId,
-            runningIds = runningIds,
-            palette = palette,
-            onDismiss = { open = false },
-            onSelected = onSelected
-        )
-    }
-}
-
-@Composable
-private fun ConfigPickerDialog(
-    configs: List<NetworkConfig>,
-    selectedId: String,
-    runningIds: Set<String>,
-    palette: Palette,
-    onDismiss: () -> Unit,
-    onSelected: (String) -> Unit
-) {
-    var pending by remember(selectedId) { mutableStateOf(selectedId) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text("选择配置", color = palette.text, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-        },
-        text = {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .animateContentSize(tween(180))
+        if (open) {
+            val density = LocalDensity.current
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(density) { 48.dp.roundToPx() }),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true)
             ) {
-                if (configs.isEmpty()) {
-                    Text("暂无可选配置", color = palette.subText, fontSize = 14.sp)
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 380.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(configs, key = { it.id }) { config ->
-                            val checked = config.id == pending
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(13.dp))
-                                    .background(
-                                        if (checked) palette.accent.copy(alpha = 0.10f)
-                                        else palette.surfaceVariant
-                                    )
-                                    .border(
-                                        BorderStroke(
-                                            0.7.dp,
-                                            if (checked) palette.accent.copy(alpha = 0.45f) else palette.border
-                                        ),
-                                        RoundedCornerShape(13.dp)
-                                    )
-                                    .clickable { pending = config.id }
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        config.displayName,
-                                        color = palette.text,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        if (config.id in runningIds) {
-                                            "${config.networkName.ifBlank { "未填写网络名称" }} · 运行中"
-                                        } else {
-                                            config.networkName.ifBlank { "未填写网络名称" }
-                                        },
-                                        color = if (config.id in runningIds) palette.success else palette.subText,
-                                        fontSize = 12.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                LazyColumn(
+                    modifier = Modifier
+                        .width(menuWidth)
+                        .heightIn(max = 320.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(palette.surface)
+                        .border(BorderStroke(0.8.dp, palette.border), RoundedCornerShape(8.dp))
+                        .padding(vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    items(configs, key = { it.id }) { config ->
+                        val checked = config.id == selectedId
+                        val running = config.id in runningIds
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(
+                                    if (checked) palette.accent.copy(alpha = 0.10f)
+                                    else Color.Transparent
+                                )
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null
+                                ) {
+                                    onSelected(config.id)
+                                    open = false
                                 }
-                                if (checked) {
-                                    Spacer(Modifier.width(10.dp))
-                                    Icon(Icons.Rounded.Check, null, tint = palette.accent)
-                                }
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    config.displayName,
+                                    color = palette.text,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    config.networkName.ifBlank { "未填写网络名称" },
+                                    color = if (running) palette.success else palette.subText,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (running) {
+                                Spacer(Modifier.width(10.dp))
+                                Text("运行中", color = palette.success, fontSize = 12.sp)
+                            }
+                            if (checked) {
+                                Spacer(Modifier.width(10.dp))
+                                Icon(Icons.Rounded.Check, null, tint = palette.accent)
                             }
                         }
                     }
                 }
             }
-        },
-        confirmButton = {
-            QButton(
-                "选择",
-                palette,
-                Modifier.width(96.dp),
-                compact = true,
-                enabled = configs.any { it.id == pending }
-            ) {
-                onSelected(pending)
-                onDismiss()
-            }
-        },
-        dismissButton = {
-            QButton("取消", palette, Modifier.width(82.dp), primary = false, compact = true, onClick = onDismiss)
-        },
-        containerColor = palette.surface,
-        shape = RoundedCornerShape(22.dp)
-    )
+        }
+    }
 }
 
 @Composable
@@ -1659,7 +1616,7 @@ private fun SettingsPage(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     StatusDot(if (rootAvailable) palette.success else palette.error)
                     Text(
-                        if (rootAvailable) "Root 可用" else "未检测到 root",
+                        if (rootAvailable) "已就绪" else "未检测到 root",
                         color = if (rootAvailable) palette.success else palette.error,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
