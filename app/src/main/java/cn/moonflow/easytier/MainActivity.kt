@@ -852,8 +852,8 @@ private fun RootNetworkPage(
             }
         }
 
-        if (instances.isNotEmpty()) {
-            items(instances, key = { it.configId }) { instance ->
+        selectedInstance?.let { instance ->
+            item(key = "selected-${instance.configId}") {
                 QCard(palette) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
