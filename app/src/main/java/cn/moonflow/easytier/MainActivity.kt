@@ -15,6 +15,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -107,7 +108,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -116,11 +116,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -309,6 +307,7 @@ private fun MoonTierApp(
     var editingConfig by remember { mutableStateOf<NetworkConfig?>(null) }
     var dialog by remember { mutableStateOf<Pair<String, String>?>(null) }
     var rootAvailable by remember { mutableStateOf(false) }
+    var rootChecking by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val palette = if (settings.darkMode) Palette.Dark else Palette.Light
     val runtime = controller.state
@@ -334,8 +333,13 @@ private fun MoonTierApp(
 
     fun refreshRootStatus() {
         scope.launch {
-            rootAvailable = withContext(Dispatchers.IO) {
-                RootManager.probe(refresh = true).available
+            rootChecking = true
+            try {
+                rootAvailable = withContext(Dispatchers.IO) {
+                    RootManager.probe(refresh = true).available
+                }
+            } finally {
+                rootChecking = false
             }
         }
     }
@@ -436,6 +440,7 @@ private fun MoonTierApp(
                         runtime = runtime,
                         rootController = rootController,
                         rootAvailable = rootAvailable,
+                        rootChecking = rootChecking,
                         rootMode = settings.rootModeEnabled,
                         onRefreshRoot = ::refreshRootStatus,
                         userServers = userServers,
@@ -551,6 +556,7 @@ private fun MainTabs(
     runtime: RuntimeState,
     rootController: RootTierController,
     rootAvailable: Boolean,
+    rootChecking: Boolean,
     rootMode: Boolean,
     onRefreshRoot: () -> Unit,
     userServers: List<ServerEntry>,
@@ -633,6 +639,7 @@ private fun MainTabs(
                         settings = settings,
                         rootController = rootController,
                         rootAvailable = rootAvailable,
+                        rootChecking = rootChecking,
                         onSettings = onSettings,
                         onRefreshRoot = onRefreshRoot
                     )
@@ -896,10 +903,11 @@ private fun RootNetworkPage(
             }
         }
 
+        val configServerConfigured = isFullConfigServerUrl(rootState.configServer.serverUrl)
         if (
+            configServerConfigured ||
             rootState.configServer.running ||
             rootState.configServer.starting ||
-            rootState.configServer.error.isNotBlank() ||
             rootState.configServer.managedNetworks.isNotEmpty()
         ) {
             item {
@@ -974,23 +982,26 @@ private fun RootConfigSelect(
 ) {
     var open by remember { mutableStateOf(false) }
     val selected = configs.firstOrNull { it.id == selectedId }
-    BoxWithConstraints(
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (open) 180f else 0f,
+        animationSpec = tween(180),
+        label = "config-arrow"
+    )
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(46.dp)
     ) {
-        val menuWidth = maxWidth
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight()
+                .height(46.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(palette.surfaceVariant)
                 .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(8.dp))
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null
-                ) { open = true }
+                ) { open = !open }
                 .padding(horizontal = 14.dp),
             contentAlignment = Alignment.CenterStart
         ) {
@@ -1007,73 +1018,78 @@ private fun RootConfigSelect(
                     Text("运行中", color = palette.success, fontSize = 12.sp)
                     Spacer(Modifier.width(8.dp))
                 }
-                Icon(Icons.Rounded.KeyboardArrowDown, null, tint = palette.subText)
+                Icon(
+                    Icons.Rounded.KeyboardArrowDown,
+                    null,
+                    tint = palette.subText,
+                    modifier = Modifier
+                        .size(22.dp)
+                        .graphicsLayer { rotationZ = arrowRotation }
+                )
             }
         }
-        if (open) {
-            val density = LocalDensity.current
-            Popup(
-                alignment = Alignment.TopStart,
-                offset = IntOffset(0, with(density) { 48.dp.roundToPx() }),
-                onDismissRequest = { open = false },
-                properties = PopupProperties(focusable = true)
+        AnimatedVisibility(
+            visible = open,
+            enter = expandVertically(animationSpec = tween(200)) + fadeIn(tween(140)),
+            exit = shrinkVertically(animationSpec = tween(160)) + fadeOut(tween(100))
+        ) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp)
+                    .heightIn(max = 320.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.surface)
+                    .border(BorderStroke(0.8.dp, palette.border), RoundedCornerShape(8.dp))
+                    .padding(vertical = 6.dp)
+                    .zIndex(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                LazyColumn(
-                    modifier = Modifier
-                        .width(menuWidth)
-                        .heightIn(max = 320.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(palette.surface)
-                        .border(BorderStroke(0.8.dp, palette.border), RoundedCornerShape(8.dp))
-                        .padding(vertical = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    items(configs, key = { it.id }) { config ->
-                        val checked = config.id == selectedId
-                        val running = config.id in runningIds
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(
-                                    if (checked) palette.accent.copy(alpha = 0.10f)
-                                    else Color.Transparent
-                                )
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null
-                                ) {
-                                    onSelected(config.id)
-                                    open = false
-                                }
-                                .padding(horizontal = 12.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    config.displayName,
-                                    color = palette.text,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    config.networkName.ifBlank { "未填写网络名称" },
-                                    color = if (running) palette.success else palette.subText,
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                items(configs, key = { it.id }) { config ->
+                    val checked = config.id == selectedId
+                    val running = config.id in runningIds
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(
+                                if (checked) palette.accent.copy(alpha = 0.10f)
+                                else Color.Transparent
+                            )
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                onSelected(config.id)
+                                open = false
                             }
-                            if (running) {
-                                Spacer(Modifier.width(10.dp))
-                                Text("运行中", color = palette.success, fontSize = 12.sp)
-                            }
-                            if (checked) {
-                                Spacer(Modifier.width(10.dp))
-                                Icon(Icons.Rounded.Check, null, tint = palette.accent)
-                            }
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                config.displayName,
+                                color = palette.text,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                config.networkName.ifBlank { "未填写网络名称" },
+                                color = if (running) palette.success else palette.subText,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        if (running) {
+                            Spacer(Modifier.width(10.dp))
+                            Text("运行中", color = palette.success, fontSize = 12.sp)
+                        }
+                        if (checked) {
+                            Spacer(Modifier.width(10.dp))
+                            Icon(Icons.Rounded.Check, null, tint = palette.accent)
                         }
                     }
                 }
@@ -1577,6 +1593,7 @@ private fun SettingsPage(
     settings: AppSettings,
     rootController: RootTierController,
     rootAvailable: Boolean,
+    rootChecking: Boolean,
     onSettings: (AppSettings) -> Unit,
     onRefreshRoot: () -> Unit
 ) {
@@ -1623,12 +1640,14 @@ private fun SettingsPage(
                     )
                     Spacer(Modifier.weight(1f))
                     QButton(
-                        text = "重新检测",
+                        text = if (rootChecking) "检测中" else "重新检测",
                         palette = palette,
                         modifier = Modifier.width(104.dp),
                         compact = true,
                         primary = false,
                         icon = Icons.Rounded.Refresh,
+                        iconRotation = SpinOnceRotation(rootChecking),
+                        enabled = !rootChecking,
                         onClick = onRefreshRoot
                     )
                 }
@@ -1695,6 +1714,7 @@ private fun SettingsPage(
                         primary = false,
                         enabled = !core.checking && !core.installing,
                         icon = Icons.Rounded.Refresh,
+                        iconRotation = SpinOnceRotation(core.checking),
                         onClick = { rootController.checkCoreUpdate() }
                     )
                     QButton(
@@ -1755,13 +1775,34 @@ private fun ModeButton(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
+    val background by animateColorAsState(
+        targetValue = if (selected) palette.accent else palette.surfaceVariant,
+        animationSpec = tween(220),
+        label = "mode-background"
+    )
+    val textColor by animateColorAsState(
+        targetValue = if (selected) palette.onAccent else palette.text,
+        animationSpec = tween(180),
+        label = "mode-text"
+    )
+    val borderWidth by animateDpAsState(
+        targetValue = if (selected) 0.dp else 0.7.dp,
+        animationSpec = tween(220),
+        label = "mode-border"
+    )
+    val contentScale by animateFloatAsState(
+        targetValue = if (selected) 1f else 0.97f,
+        animationSpec = tween(220),
+        label = "mode-scale"
+    )
     Box(
         modifier = modifier
             .height(44.dp)
+            .graphicsLayer { scaleX = contentScale; scaleY = contentScale }
             .clip(RoundedCornerShape(14.dp))
-            .background(if (selected) palette.accent else palette.surfaceVariant)
+            .background(background)
             .border(
-                BorderStroke(if (selected) 0.dp else 0.7.dp, palette.border),
+                BorderStroke(borderWidth, palette.border),
                 RoundedCornerShape(14.dp)
             )
             .clickable(
@@ -1773,11 +1814,24 @@ private fun ModeButton(
     ) {
         Text(
             text,
-            color = if (selected) palette.onAccent else palette.text,
+            color = textColor,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold
         )
     }
+}
+
+@Composable
+private fun SpinOnceRotation(active: Boolean): Float {
+    var turns by remember { mutableIntStateOf(0) }
+    LaunchedEffect(active) {
+        if (active) turns += 1
+    }
+    return animateFloatAsState(
+        targetValue = turns * 360f,
+        animationSpec = tween(600),
+        label = "refresh-spin"
+    ).value
 }
 
 @Composable
@@ -2380,6 +2434,7 @@ private fun QButton(
     compact: Boolean = false,
     enabled: Boolean = true,
     icon: ImageVector? = null,
+    iconRotation: Float = 0f,
     onClick: () -> Unit
 ) {
     val source = remember { MutableInteractionSource() }
@@ -2414,7 +2469,14 @@ private fun QButton(
         )
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
             if (icon != null) {
-                Icon(icon, null, tint = if (enabled) fg else palette.subText, modifier = Modifier.size(18.dp))
+                Icon(
+                    icon,
+                    null,
+                    tint = if (enabled) fg else palette.subText,
+                    modifier = Modifier
+                        .size(18.dp)
+                        .graphicsLayer { rotationZ = iconRotation }
+                )
                 Spacer(Modifier.width(6.dp))
             }
             Text(text, color = if (enabled) fg else palette.subText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)

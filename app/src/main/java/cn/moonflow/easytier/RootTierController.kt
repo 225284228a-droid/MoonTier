@@ -61,6 +61,7 @@ class RootTierController(private val context: Context) {
                 )
             }.onFailure { error ->
                 Log.e(TAG, "Root manager initialization failed", error)
+                if (!isFullConfigServerUrl(state.configServer.serverUrl)) return@onFailure
                 state = state.copy(
                     configServer = state.configServer.copy(
                         error = error.message ?: "Root manager 初始化失败"
