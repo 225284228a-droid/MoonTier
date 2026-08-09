@@ -1703,12 +1703,14 @@ private fun SettingsPage(
     onExportDiagnostics: () -> Unit
 ) {
     var disclaimer by remember { mutableStateOf(false) }
-    var appLogExpanded by remember { mutableStateOf(false) }
+    var logExpanded by remember { mutableStateOf(false) }
+    var appLogRefreshing by remember { mutableStateOf(false) }
     var appLogText by remember { mutableStateOf(AppDiagnostics.recent(8_000)) }
+    val scope = rememberCoroutineScope()
     val core = rootController.state.core
 
-    LaunchedEffect(appLogExpanded) {
-        if (appLogExpanded) {
+    LaunchedEffect(logExpanded) {
+        if (logExpanded) {
             appLogText = withContext(Dispatchers.IO) { AppDiagnostics.recent(8_000) }
         }
     }
@@ -1792,62 +1794,60 @@ private fun SettingsPage(
         }
         item {
             QCard(palette) {
-                Text("日志", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(CoreLogLevel.OFF, CoreLogLevel.NORMAL, CoreLogLevel.DEBUG).forEach { level ->
-                        ModeButton(
-                            text = CoreLogLevel.label(level),
-                            selected = CoreLogLevel.normalize(settings.coreLogLevel) == level,
-                            palette = palette,
-                            modifier = Modifier.weight(1f),
-                            onClick = { onSettings(settings.copy(coreLogLevel = level)) }
-                        )
-                    }
-                }
-            }
-        }
-        item {
-            QCard(palette) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
-                        ) { appLogExpanded = !appLogExpanded },
+                        ) { logExpanded = !logExpanded },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("应用日志", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                    Text("日志", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                     Spacer(Modifier.weight(1f))
-                    ExpandArrow(appLogExpanded, palette) { appLogExpanded = !appLogExpanded }
+                    ExpandArrow(logExpanded, palette) { logExpanded = !logExpanded }
                 }
                 AnimatedVisibility(
-                    visible = appLogExpanded,
+                    visible = logExpanded,
                     enter = expandVertically(tween(220)) + fadeIn(tween(180)),
                     exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
                 ) {
                     Column {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            if (appLogText.isBlank()) "暂无记录" else appLogText,
-                            color = palette.subText,
-                            fontSize = 11.sp,
-                            lineHeight = 16.sp,
-                            maxLines = 30,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Spacer(Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(CoreLogLevel.OFF, CoreLogLevel.NORMAL, CoreLogLevel.DEBUG).forEach { level ->
+                                ModeButton(
+                                    text = CoreLogLevel.label(level),
+                                    selected = CoreLogLevel.normalize(settings.coreLogLevel) == level,
+                                    palette = palette,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { onSettings(settings.copy(coreLogLevel = level)) }
+                                )
+                            }
+                        }
                         Spacer(Modifier.height(12.dp))
                         ActionBar(palette) {
                             QButton(
-                                text = "刷新",
+                                text = if (appLogRefreshing) "刷新中" else "刷新",
                                 palette = palette,
                                 modifier = Modifier.weight(1f),
                                 compact = true,
                                 primary = false,
+                                enabled = !appLogRefreshing,
                                 icon = Icons.Rounded.Refresh,
+                                iconRotation = SpinOnceRotation(appLogRefreshing),
                                 onClick = {
-                                    appLogText = AppDiagnostics.recent(8_000)
+                                    scope.launch {
+                                        appLogRefreshing = true
+                                        try {
+                                            appLogText = withContext(Dispatchers.IO) {
+                                                AppDiagnostics.recent(8_000)
+                                            }
+                                            delay(80)
+                                        } finally {
+                                            appLogRefreshing = false
+                                        }
+                                    }
                                 }
                             )
                             QButton(
@@ -1859,6 +1859,15 @@ private fun SettingsPage(
                                 onClick = onExportDiagnostics
                             )
                         }
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            if (appLogText.isBlank()) "暂无记录" else appLogText,
+                            color = palette.subText,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp,
+                            maxLines = 30,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
