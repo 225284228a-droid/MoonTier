@@ -227,7 +227,8 @@ data class AppSettings(
     val exitNodeAutoRoutes: Boolean = false,
     val darkMode: Boolean = false,
     val rootModeEnabled: Boolean = false,
-    val coreAutoUpdate: Boolean = true,
+    val coreAutoUpdate: Boolean = false,
+    val coreLogLevel: String = CoreLogLevel.OFF,
     val configServerUrl: String = "",
     val configServerHostname: String = "",
     val configServerMachineId: String = "",
@@ -240,6 +241,7 @@ data class AppSettings(
         .put("dark_mode", darkMode)
         .put("root_mode_enabled", rootModeEnabled)
         .put("core_auto_update", coreAutoUpdate)
+        .put("core_log_level", CoreLogLevel.normalize(coreLogLevel))
         .put("config_server_url", configServerUrl)
         .put("config_server_hostname", configServerHostname)
         .put("config_server_machine_id", configServerMachineId)
@@ -252,7 +254,8 @@ data class AppSettings(
             exitNodeAutoRoutes = obj.optBoolean("exit_node_auto_routes", false),
             darkMode = obj.optBoolean("dark_mode", false),
             rootModeEnabled = obj.optBoolean("root_mode_enabled", false),
-            coreAutoUpdate = obj.optBoolean("core_auto_update", true),
+            coreAutoUpdate = obj.optBoolean("core_auto_update", false),
+            coreLogLevel = CoreLogLevel.normalize(obj.optString("core_log_level", CoreLogLevel.OFF)),
             configServerUrl = obj.optString("config_server_url", ""),
             configServerHostname = obj.optString("config_server_hostname", ""),
             configServerMachineId = obj.optString("config_server_machine_id", ""),

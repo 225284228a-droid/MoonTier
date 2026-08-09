@@ -1,6 +1,7 @@
 package cn.moonflow.easytier
 
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings.Secure
@@ -77,6 +78,18 @@ class RootTierController(private val context: Context) {
         scope.cancel()
     }
 
+    fun diagnosticLogTail(): List<String> = readManagerLogTail(loadManagerOptions())
+
+    fun updateLogLevel(level: String) {
+        if (CoreLogLevel.normalize(level) == CoreLogLevel.OFF) {
+            managerLogFile.delete()
+            state = state.copy(
+                instances = state.instances.map { it.copy(logs = emptyList()) },
+                configServer = state.configServer.copy(logs = emptyList())
+            )
+        }
+    }
+
     fun checkCoreUpdate() {
         scope.launch {
             state = state.copy(core = state.core.copy(checking = true, message = ""))
@@ -94,6 +107,7 @@ class RootTierController(private val context: Context) {
     fun installCore() {
         scope.launch {
             state = state.copy(core = state.core.copy(installing = true, progress = 0, message = ""))
+            AppDiagnostics.event("root", "official core download requested")
             try {
                 val tag = withContext(Dispatchers.IO) {
                     coreManager.installLatest { progress, _ ->
@@ -109,11 +123,72 @@ class RootTierController(private val context: Context) {
                         message = "已安装官方核心 $tag"
                     )
                 )
+                AppDiagnostics.event("root", "official core installed: $tag")
             } catch (error: Exception) {
+                AppDiagnostics.error("root", "official core installation failed", error)
                 state = state.copy(
                     core = state.core.copy(
                         installing = false,
                         message = error.message ?: "下载核心失败"
+                    )
+                )
+            }
+        }
+    }
+
+    fun installCoreZip(uri: Uri) {
+        scope.launch {
+            state = state.copy(core = state.core.copy(installing = true, progress = 0, message = ""))
+            AppDiagnostics.event("root", "local core ZIP import requested")
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    managerMutex.withLock {
+                        val options = loadManagerOptions()
+                            ?: optionsFromSettings(store.loadSettings(), enabled = false)
+                        val restartManager = managerAlive()
+                        if (restartManager) stopManagerBlocking()
+                        try {
+                            val version = coreManager.installFromZip(uri) { progress, _ ->
+                                state = state.copy(core = state.core.copy(progress = progress))
+                            }
+                            val refreshed = if (restartManager) {
+                                ensureManagerBlocking(options)
+                                val snapshot = queryManagerSnapshot()
+                                applyRootRouting(snapshot)
+                                refreshedState(snapshot, options)
+                            } else {
+                                null
+                            }
+                            version to refreshed
+                        } catch (error: Exception) {
+                            if (restartManager && coreManager.isReady()) {
+                                runCatching { ensureManagerBlocking(options) }
+                                    .onFailure { AppDiagnostics.error("root", "failed to restore manager after ZIP import", it) }
+                            }
+                            throw error
+                        }
+                    }
+                }
+            }
+            result.onSuccess { (version, refreshed) ->
+                AppDiagnostics.event("root", "local core ZIP installed")
+                state = state.copy(
+                    core = RootCoreState(
+                        ready = true,
+                        installedVersion = version,
+                        latestVersion = state.core.latestVersion,
+                        progress = 100,
+                        message = "已导入官方核心"
+                    ),
+                    instances = refreshed?.instances ?: state.instances,
+                    configServer = refreshed?.configServer ?: state.configServer
+                )
+            }.onFailure { error ->
+                AppDiagnostics.error("root", "local core ZIP import failed", error)
+                state = state.copy(
+                    core = state.core.copy(
+                        installing = false,
+                        message = error.message ?: "导入核心失败"
                     )
                 )
             }
@@ -125,6 +200,7 @@ class RootTierController(private val context: Context) {
         if (existing?.running == true || existing?.starting == true || existing?.stopping == true) return
 
         Log.i(TAG, "Root manager start requested id=${config.id}")
+        AppDiagnostics.event("root", "network start requested id=${config.id} name=${config.displayName}")
         val starting = RootInstanceState(
             configId = config.id,
             displayName = config.displayName,
@@ -142,12 +218,14 @@ class RootTierController(private val context: Context) {
             }
             result.onSuccess { refreshed ->
                 Log.i(TAG, "Root instance ${config.id} started in ${SystemClock.elapsedRealtime() - startedAt}ms")
+                AppDiagnostics.event("root", "network started id=${config.id} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms")
                 state = state.copy(
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
             }.onFailure { error ->
                 Log.e(TAG, "Root instance ${config.id} failed", error)
+                AppDiagnostics.error("root", "network start failed id=${config.id}", error)
                 state = state.copy(
                     instances = state.instances.map {
                         if (it.configId == config.id) {
@@ -168,6 +246,7 @@ class RootTierController(private val context: Context) {
     fun stop(configId: String) {
         val instance = state.instances.firstOrNull { it.configId == configId } ?: return
         if (instance.stopping) return
+        AppDiagnostics.event("root", "network stop requested id=$configId")
         state = state.copy(
             instances = state.instances.map {
                 if (it.configId == configId) it.copy(stopping = true, error = "") else it
@@ -180,11 +259,13 @@ class RootTierController(private val context: Context) {
                 }
             }
             result.onSuccess { refreshed ->
+                AppDiagnostics.event("root", "network stopped id=$configId")
                 state = state.copy(
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
             }.onFailure { error ->
+                AppDiagnostics.error("root", "network stop failed id=$configId", error)
                 state = state.copy(
                     instances = state.instances.map {
                         if (it.configId == configId) {
@@ -200,6 +281,7 @@ class RootTierController(private val context: Context) {
 
     fun stopAll() {
         if (state.instances.isEmpty() && !state.configServer.running && !managerPidFile.exists()) return
+        AppDiagnostics.event("root", "shared manager stop requested")
         state = state.copy(
             instances = state.instances.map { it.copy(stopping = true, starting = false) },
             configServer = state.configServer.copy(stopping = true, starting = false)
@@ -219,6 +301,7 @@ class RootTierController(private val context: Context) {
                     managedNetworks = emptyList()
                 )
             )
+            AppDiagnostics.event("root", "shared manager stopped")
         }
     }
 
@@ -424,13 +507,24 @@ class RootTierController(private val context: Context) {
         saveManagerOptions(options)
         managerPidFile.delete()
 
+        val logLevel = store.loadSettings().coreLogLevel
+        val managerLogPath = if (CoreLogLevel.normalize(logLevel) == CoreLogLevel.OFF) {
+            "/dev/null"
+        } else {
+            managerLogFile.absolutePath
+        }
         val command = buildString {
+            append("RUST_LOG=")
+            append(shq(CoreLogLevel.rustFilter(logLevel)))
+            append(" ET_CONSOLE_LOG_LEVEL=")
+            append(shq(CoreLogLevel.rustLevel(logLevel)))
+            append(' ')
             append("sh ")
             append(shq(scriptFile.absolutePath))
             append(" start ")
             append(shq(coreManager.coreFile.absolutePath))
             append(' ')
-            append(shq(managerLogFile.absolutePath))
+            append(shq(managerLogPath))
             append(' ')
             append(shq(managerPidFile.absolutePath))
             append(" --config-dir ")
@@ -450,6 +544,7 @@ class RootTierController(private val context: Context) {
         }
         val result = RootManager.su(command, timeoutMs = 20000)
         if (!result.success) {
+            AppDiagnostics.error("root", "shared manager start command failed: ${result.output.takeLast(1200)}")
             throw IllegalStateException(managerError(result, "共享 manager 启动失败"))
         }
 
@@ -511,6 +606,7 @@ class RootTierController(private val context: Context) {
             lastRootExitRoute = exitRouteActive
         } else {
             Log.w(TAG, "Root policy route apply failed: ${result.output}")
+            AppDiagnostics.warn("root", "policy route apply failed: ${result.output.takeLast(1200)}")
         }
     }
 
@@ -678,7 +774,13 @@ class RootTierController(private val context: Context) {
                     running = parsed.running,
                     localCidr = parsed.localCidr,
                     nodes = parsed.nodes,
-                    logs = parsed.logs.ifEmpty { previous?.logs.orEmpty() },
+                    logs = filteredCoreLogs(parsed.logs).let { logs ->
+                        if (logs.isNotEmpty() || CoreLogLevel.normalize(store.loadSettings().coreLogLevel) == CoreLogLevel.OFF) {
+                            logs
+                        } else {
+                            previous?.logs.orEmpty()
+                        }
+                    },
                     error = parsed.error
                 )
             }
@@ -840,7 +942,7 @@ class RootTierController(private val context: Context) {
 
     private fun requireRootAndCore() {
         if (!RootManager.probe().available) {
-            throw IllegalStateException("未检测到 root，请先在 KernelSU 中授权")
+            throw IllegalStateException("未检测到 root，请先在 Root 管理器中授权 MoonTier（KernelSU/Magisk/APatch）")
         }
         if (!coreManager.isReady()) {
             throw IllegalStateException("尚未下载官方 easytier-core，或管理客户端缺失")
@@ -952,7 +1054,9 @@ class RootTierController(private val context: Context) {
     }
 
     private fun readManagerLogTail(options: ManagerOptions?): List<String> {
+        if (CoreLogLevel.normalize(store.loadSettings().coreLogLevel) == CoreLogLevel.OFF) return emptyList()
         if (!managerLogFile.exists()) return emptyList()
+        trimManagerLog()
         val rawUrl = options?.rawConfigServerUrl.orEmpty()
         val resolvedUrl = options?.resolvedConfigServerUrl.orEmpty()
         return runCatching { managerLogFile.readText() }
@@ -962,6 +1066,23 @@ class RootTierController(private val context: Context) {
             .map { redactConfigServerToken(it, rawUrl, resolvedUrl) }
             .toList()
             .takeLast(80)
+    }
+
+    private fun trimManagerLog() {
+        if (managerLogFile.length() <= MAX_MANAGER_LOG_BYTES) return
+        runCatching {
+            managerLogFile.writeText(
+                managerLogFile.readText().takeLast(MAX_MANAGER_LOG_BYTES / 2)
+            )
+        }.onFailure { AppDiagnostics.warn("root", "manager log trimming failed", it) }
+    }
+
+    private fun filteredCoreLogs(logs: List<String>): List<String> = when (
+        CoreLogLevel.normalize(store.loadSettings().coreLogLevel)
+    ) {
+        CoreLogLevel.OFF -> emptyList()
+        CoreLogLevel.NORMAL -> logs.filter { IMPORTANT_CORE_LOG.containsMatchIn(it) }
+        else -> logs
     }
 
     private fun redactConfigServerToken(line: String, rawUrl: String, resolvedUrl: String): String {
@@ -1115,6 +1236,11 @@ class RootTierController(private val context: Context) {
 
     companion object {
         private const val TAG = "MoonTierRoot"
+        private const val MAX_MANAGER_LOG_BYTES = 512 * 1024
+        private val IMPORTANT_CORE_LOG = Regex(
+            "error|warn|fail|panic|closed|stop|disconnect|exit|timeout",
+            RegexOption.IGNORE_CASE
+        )
         private const val MANAGER_RPC_PORTAL = "127.0.0.1:14999"
         private const val CONFIG_SOURCE_WEB = 2
         private val CONFIG_SERVER_TOKEN_REGEX =

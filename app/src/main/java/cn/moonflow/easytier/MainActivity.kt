@@ -131,6 +131,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var rootController: RootTierController
     private var pendingVpnConfig: String? = null
     private var pendingExportText: String = ""
+    private var pendingDiagnosticText: String = ""
     private var onImportedConfig: ((NetworkConfig) -> Unit)? = null
     private var onFileMessage: ((String, String) -> Unit)? = null
 
@@ -139,8 +140,10 @@ class MainActivity : ComponentActivity() {
     ) { result ->
         val vpnConfig = pendingVpnConfig
         if (result.resultCode == Activity.RESULT_OK) {
+            AppDiagnostics.event("vpn", "VPN permission granted")
             vpnConfig?.let { startVpnServiceWith(it) }
         } else if (vpnConfig != null) {
+            AppDiagnostics.warn("vpn", "VPN permission denied")
             controller.onVpnPermissionDenied()
         }
         pendingVpnConfig = null
@@ -174,11 +177,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val importCoreZipLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        AppDiagnostics.event("root", "core ZIP selected for import")
+        rootController.installCoreZip(uri)
+    }
+
+    private val exportDiagnosticsLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        runCatching {
+            contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(pendingDiagnosticText) }
+                ?: error("无法写入日志文件")
+        }.onSuccess {
+            AppDiagnostics.info("launcher", "diagnostic report exported")
+            onFileMessage?.invoke("导出完成", "应用日志已写入文件")
+        }.onFailure {
+            AppDiagnostics.error("launcher", "diagnostic report export failed", it)
+            onFileMessage?.invoke("导出失败", it.message ?: "无法写入日志文件")
+        }
+    }
+
     private var isForeground by mutableStateOf(true)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = ConfigStore(applicationContext)
+        AppDiagnostics.initialize(applicationContext, store.loadSettings().coreLogLevel)
+        installUncaughtExceptionHandler()
+        AppDiagnostics.event("launcher", "MainActivity created")
         controller = EasyTierController(applicationContext, store, ::requestVpn)
         rootController = RootTierController(applicationContext)
 
@@ -192,9 +222,14 @@ class MainActivity : ComponentActivity() {
                 controller = controller,
                 rootController = rootController,
                 importToml = { importTomlLauncher.launch(arrayOf("text/*", "application/toml", "application/octet-stream")) },
+                importCoreZip = { importCoreZipLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")) },
                 exportToml = { config ->
                     pendingExportText = TomlCodec.build(config)
                     exportTomlLauncher.launch("${config.displayName}.toml")
+                },
+                exportDiagnostics = { report ->
+                    pendingDiagnosticText = report
+                    exportDiagnosticsLauncher.launch("moontier-diagnostics.txt")
                 },
                 bindImportHandler = { imported, message ->
                     onImportedConfig = imported
@@ -210,25 +245,51 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        AppDiagnostics.event("launcher", "MainActivity destroyed")
         controller.release()
         rootController.release()
         super.onDestroy()
     }
 
     private fun requestVpn(vpnJson: String) {
-        val intent = VpnService.prepare(this)
+        AppDiagnostics.event("vpn", "VPN permission check requested")
+        val intent = runCatching { VpnService.prepare(this) }.getOrElse { error ->
+            controller.onVpnServiceStartFailed(error)
+            return
+        }
         if (intent != null) {
             pendingVpnConfig = vpnJson
-            vpnPermissionLauncher.launch(intent)
+            runCatching { vpnPermissionLauncher.launch(intent) }
+                .onFailure { controller.onVpnServiceStartFailed(it) }
         } else {
             startVpnServiceWith(vpnJson)
         }
     }
 
     private fun startVpnServiceWith(vpnJson: String) {
-        val intent = Intent(this, EasyTierVpnService::class.java)
-            .putExtra(EasyTierVpnService.EXTRA_CONFIG, vpnJson)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+        runCatching {
+            val intent = Intent(this, EasyTierVpnService::class.java)
+                .putExtra(EasyTierVpnService.EXTRA_CONFIG, vpnJson)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+            AppDiagnostics.event("vpn", "VPN service start requested")
+        }.onFailure { controller.onVpnServiceStartFailed(it) }
+    }
+
+    private fun installUncaughtExceptionHandler() {
+        synchronized(MainActivity::class.java) {
+            if (crashHandlerInstalled) return
+            val previous = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+                AppDiagnostics.error("launcher", "uncaught crash on ${thread.name}", error)
+                previous?.uncaughtException(thread, error)
+            }
+            crashHandlerInstalled = true
+        }
+    }
+
+    private companion object {
+        @Volatile
+        var crashHandlerInstalled = false
     }
 }
 
@@ -295,7 +356,9 @@ private fun MoonTierApp(
     controller: EasyTierController,
     rootController: RootTierController,
     importToml: () -> Unit,
+    importCoreZip: () -> Unit,
     exportToml: (NetworkConfig) -> Unit,
+    exportDiagnostics: (String) -> Unit,
     bindImportHandler: (((NetworkConfig) -> Unit, (String, String) -> Unit) -> Unit)
 ) {
     var settings by remember { mutableStateOf(store.loadSettings()) }
@@ -326,6 +389,7 @@ private fun MoonTierApp(
     }
 
     fun saveSettings(next: AppSettings) {
+        val logLevelChanged = CoreLogLevel.normalize(next.coreLogLevel) != CoreLogLevel.normalize(settings.coreLogLevel)
         if (next.rootModeEnabled != settings.rootModeEnabled) {
             if (next.rootModeEnabled) {
                 controller.stop()
@@ -335,6 +399,12 @@ private fun MoonTierApp(
         }
         settings = next
         store.saveSettings(next)
+        AppDiagnostics.configure(next.coreLogLevel)
+        if (logLevelChanged) {
+            controller.updateLogLevel(next.coreLogLevel)
+            rootController.updateLogLevel(next.coreLogLevel)
+        }
+        AppDiagnostics.info("launcher", "settings saved mode=${if (next.rootModeEnabled) "root" else "vpn"} log=${next.coreLogLevel}")
     }
 
     fun refreshRootStatus() {
@@ -517,7 +587,18 @@ private fun MoonTierApp(
                                 rootController.startConfigServer(settings)
                             }
                         },
-                        onDisconnectConfigServer = { rootController.stopConfigServer() }
+                        onDisconnectConfigServer = { rootController.stopConfigServer() },
+                        onImportCoreZip = importCoreZip,
+                        onExportDiagnostics = {
+                            exportDiagnostics(
+                                AppDiagnostics.buildReport(
+                                    settings = settings,
+                                    runtime = runtime,
+                                    root = rootController.state,
+                                    managerLog = rootController.diagnosticLogTail()
+                                )
+                            )
+                        }
                     )
                 }
             }
@@ -585,7 +666,9 @@ private fun MainTabs(
     onSyncOfficial: () -> Unit,
     onDownloadUsers: (String) -> Unit,
     onConnectConfigServer: () -> Unit,
-    onDisconnectConfigServer: () -> Unit
+    onDisconnectConfigServer: () -> Unit,
+    onImportCoreZip: () -> Unit,
+    onExportDiagnostics: () -> Unit
 ) {
     val tabs = remember {
         listOf(
@@ -651,7 +734,9 @@ private fun MainTabs(
                         rootAvailable = rootAvailable,
                         rootChecking = rootChecking,
                         onSettings = onSettings,
-                        onRefreshRoot = onRefreshRoot
+                        onRefreshRoot = onRefreshRoot,
+                        onImportCoreZip = onImportCoreZip,
+                        onExportDiagnostics = onExportDiagnostics
                     )
                 }
             }
@@ -1613,10 +1698,20 @@ private fun SettingsPage(
     rootAvailable: Boolean,
     rootChecking: Boolean,
     onSettings: (AppSettings) -> Unit,
-    onRefreshRoot: () -> Unit
+    onRefreshRoot: () -> Unit,
+    onImportCoreZip: () -> Unit,
+    onExportDiagnostics: () -> Unit
 ) {
     var disclaimer by remember { mutableStateOf(false) }
+    var appLogExpanded by remember { mutableStateOf(false) }
+    var appLogText by remember { mutableStateOf(AppDiagnostics.recent(8_000)) }
     val core = rootController.state.core
+
+    LaunchedEffect(appLogExpanded) {
+        if (appLogExpanded) {
+            appLogText = withContext(Dispatchers.IO) { AppDiagnostics.recent(8_000) }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -1647,36 +1742,38 @@ private fun SettingsPage(
                         onClick = { onSettings(settings.copy(rootModeEnabled = true)) }
                     )
                 }
-                Spacer(Modifier.height(12.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatusDot(if (rootAvailable) palette.success else palette.error)
-                    Text(
-                        if (rootAvailable) "已就绪" else "未检测到 root",
-                        color = if (rootAvailable) palette.success else palette.error,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Spacer(Modifier.weight(1f))
-                    QButton(
-                        text = if (rootChecking) "检测中" else "重新检测",
-                        palette = palette,
-                        modifier = Modifier.width(104.dp),
-                        compact = true,
-                        primary = false,
-                        icon = Icons.Rounded.Refresh,
-                        iconRotation = SpinOnceRotation(rootChecking),
-                        enabled = !rootChecking,
-                        onClick = onRefreshRoot
-                    )
-                }
-                if (!rootAvailable) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "请先在 KernelSU 中授权 MoonTier，再重新检测。",
-                        color = palette.subText,
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp
-                    )
+                if (settings.rootModeEnabled) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        StatusDot(if (rootAvailable) palette.success else palette.error)
+                        Text(
+                            if (rootAvailable) "Root可用" else "未检测到 Root 管理器",
+                            color = if (rootAvailable) palette.success else palette.error,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(Modifier.weight(1f))
+                        QButton(
+                            text = if (rootChecking) "检测中" else "重新检测",
+                            palette = palette,
+                            modifier = Modifier.width(104.dp),
+                            compact = true,
+                            primary = false,
+                            icon = Icons.Rounded.Refresh,
+                            iconRotation = SpinOnceRotation(rootChecking),
+                            enabled = !rootChecking,
+                            onClick = onRefreshRoot
+                        )
+                    }
+                    if (!rootAvailable) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "请先在 Root 管理器中授权 MoonTier（KernelSU/Magisk/APatch），再重新检测。",
+                            color = palette.subText,
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp
+                        )
+                    }
                 }
             }
         }
@@ -1690,6 +1787,79 @@ private fun SettingsPage(
                 }
                 SwitchRow("自动配置出口节点路由", settings.exitNodeAutoRoutes, palette) {
                     if (it) disclaimer = true else onSettings(settings.copy(exitNodeAutoRoutes = false))
+                }
+            }
+        }
+        item {
+            QCard(palette) {
+                Text("日志", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(CoreLogLevel.OFF, CoreLogLevel.NORMAL, CoreLogLevel.DEBUG).forEach { level ->
+                        ModeButton(
+                            text = CoreLogLevel.label(level),
+                            selected = CoreLogLevel.normalize(settings.coreLogLevel) == level,
+                            palette = palette,
+                            modifier = Modifier.weight(1f),
+                            onClick = { onSettings(settings.copy(coreLogLevel = level)) }
+                        )
+                    }
+                }
+            }
+        }
+        item {
+            QCard(palette) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { appLogExpanded = !appLogExpanded },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("应用日志", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                    Spacer(Modifier.weight(1f))
+                    ExpandArrow(appLogExpanded, palette) { appLogExpanded = !appLogExpanded }
+                }
+                AnimatedVisibility(
+                    visible = appLogExpanded,
+                    enter = expandVertically(tween(220)) + fadeIn(tween(180)),
+                    exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                ) {
+                    Column {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            if (appLogText.isBlank()) "暂无记录" else appLogText,
+                            color = palette.subText,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp,
+                            maxLines = 30,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        ActionBar(palette) {
+                            QButton(
+                                text = "刷新",
+                                palette = palette,
+                                modifier = Modifier.weight(1f),
+                                compact = true,
+                                primary = false,
+                                icon = Icons.Rounded.Refresh,
+                                onClick = {
+                                    appLogText = AppDiagnostics.recent(8_000)
+                                }
+                            )
+                            QButton(
+                                text = "导出日志",
+                                palette = palette,
+                                modifier = Modifier.weight(1f),
+                                compact = true,
+                                icon = Icons.Rounded.Description,
+                                onClick = onExportDiagnostics
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1744,6 +1914,16 @@ private fun SettingsPage(
                         enabled = !core.installing,
                         icon = Icons.Rounded.Download,
                         onClick = { rootController.installCore() }
+                    )
+                    QButton(
+                        text = "导入 ZIP",
+                        palette = palette,
+                        modifier = Modifier.weight(1f),
+                        compact = true,
+                        primary = false,
+                        enabled = !core.installing,
+                        icon = Icons.Rounded.Description,
+                        onClick = onImportCoreZip
                     )
                     }
                     Spacer(Modifier.height(8.dp))

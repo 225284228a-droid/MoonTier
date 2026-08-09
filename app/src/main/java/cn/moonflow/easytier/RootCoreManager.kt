@@ -1,6 +1,7 @@
 package cn.moonflow.easytier
 
 import android.content.Context
+import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -47,14 +48,38 @@ class RootCoreManager(private val context: Context) {
         withContext(Dispatchers.IO) {
             val tag = checkLatest() ?: throw IllegalStateException("无法获取官方最新版本")
             val zip = File(context.cacheDir, "easytier-core-$tag.zip")
-            downloadRelease(tag, zip, onProgress)
-            extractRelease(zip)
-            versionFile.writeText(tag)
-            zip.delete()
-            coreFile.setExecutable(true, false)
-            cliFile.setExecutable(true, false)
+            try {
+                downloadRelease(tag, zip, onProgress)
+                installRelease(zip, tag)
+            } finally {
+                zip.delete()
+            }
             tag
         }
+
+    suspend fun installFromZip(uri: Uri, onProgress: (Int, Int) -> Unit): String =
+        withContext(Dispatchers.IO) {
+            val zip = File.createTempFile("easytier-import-", ".zip", context.cacheDir)
+            try {
+                onProgress(0, 0)
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(zip).use { output -> input.copyTo(output) }
+                } ?: throw IllegalStateException("无法读取所选 ZIP 文件")
+                if (zip.length() == 0L) throw IllegalStateException("所选 ZIP 文件为空")
+                installRelease(zip, "本地 ZIP")
+                onProgress(100, (zip.length() / 1024).toInt())
+                "本地 ZIP"
+            } finally {
+                zip.delete()
+            }
+        }
+
+    private fun installRelease(zip: File, version: String) {
+        extractRelease(zip)
+        versionFile.writeText(version)
+        coreFile.setExecutable(true, false)
+        cliFile.setExecutable(true, false)
+    }
 
     private fun downloadRelease(
         tag: String,
@@ -88,32 +113,78 @@ class RootCoreManager(private val context: Context) {
 
     private fun extractRelease(zip: File) {
         coreDir.mkdirs()
-        ZipFile(zip).use { archive ->
-            val entries = archive.entries()
-            var coreExtracted = false
-            var cliExtracted = false
-            while (entries.hasMoreElements()) {
-                val entry = entries.nextElement()
-                if (entry.isDirectory) continue
-                val name = entry.name.replace('\\', '/')
-                when {
-                    name.endsWith("/easytier-core") -> {
-                        archive.getInputStream(entry).use { input ->
-                            coreFile.outputStream().use { it.write(input.readBytes()) }
+        val tempCore = File(coreDir, "${coreFile.name}.tmp")
+        val tempCli = File(coreDir, "${cliFile.name}.tmp")
+        tempCore.delete()
+        tempCli.delete()
+        try {
+            ZipFile(zip).use { archive ->
+                val entries = archive.entries()
+                var coreExtracted = false
+                var cliExtracted = false
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    if (entry.isDirectory) continue
+                    when (entry.name.replace('\\', '/')) {
+                        "easytier-core" -> {
+                            archive.getInputStream(entry).use { input ->
+                                tempCore.outputStream().use { output -> input.copyTo(output) }
+                            }
+                            coreExtracted = tempCore.length() > 0L
                         }
-                        coreExtracted = true
-                    }
-                    name.endsWith("/easytier-cli") -> {
-                        archive.getInputStream(entry).use { input ->
-                            cliFile.outputStream().use { it.write(input.readBytes()) }
+                        "easytier-cli" -> {
+                            archive.getInputStream(entry).use { input ->
+                                tempCli.outputStream().use { output -> input.copyTo(output) }
+                            }
+                            cliExtracted = tempCli.length() > 0L
                         }
-                        cliExtracted = true
+                        else -> {
+                            val name = entry.name.replace('\\', '/')
+                            if (name.endsWith("/easytier-core")) {
+                                archive.getInputStream(entry).use { input ->
+                                    tempCore.outputStream().use { output -> input.copyTo(output) }
+                                }
+                                coreExtracted = tempCore.length() > 0L
+                            } else if (name.endsWith("/easytier-cli")) {
+                                archive.getInputStream(entry).use { input ->
+                                    tempCli.outputStream().use { output -> input.copyTo(output) }
+                                }
+                                cliExtracted = tempCli.length() > 0L
+                            }
+                        }
                     }
                 }
+                if (!coreExtracted || !cliExtracted) {
+                    throw IllegalStateException("官方压缩包中缺少 easytier-core 或 easytier-cli")
+                }
             }
-            if (!coreExtracted || !cliExtracted) {
-                throw IllegalStateException("官方压缩包中缺少 easytier-core 或 easytier-cli")
-            }
+            replaceBinaries(tempCore, tempCli)
+        } finally {
+            tempCore.delete()
+            tempCli.delete()
+        }
+    }
+
+    private fun replaceBinaries(tempCore: File, tempCli: File) {
+        val oldCore = File(coreDir, "${coreFile.name}.previous")
+        val oldCli = File(coreDir, "${cliFile.name}.previous")
+        oldCore.delete()
+        oldCli.delete()
+        val hadCore = coreFile.exists()
+        val hadCli = cliFile.exists()
+        try {
+            if (hadCore && !coreFile.renameTo(oldCore)) throw IllegalStateException("无法替换现有 easytier-core")
+            if (hadCli && !cliFile.renameTo(oldCli)) throw IllegalStateException("无法替换现有 easytier-cli")
+            if (!tempCore.renameTo(coreFile)) throw IllegalStateException("无法安装 easytier-core")
+            if (!tempCli.renameTo(cliFile)) throw IllegalStateException("无法安装 easytier-cli")
+            oldCore.delete()
+            oldCli.delete()
+        } catch (error: Exception) {
+            coreFile.delete()
+            cliFile.delete()
+            if (hadCore) oldCore.renameTo(coreFile)
+            if (hadCli) oldCli.renameTo(cliFile)
+            throw error
         }
     }
 

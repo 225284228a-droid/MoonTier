@@ -9,6 +9,7 @@ public final class NativeEasyTier {
 
     private NativeEasyTier() {}
 
+    public static native void setLogLevel(String level);
     public static native int parseConfig(String config);
     public static native int runNetworkInstance(String config);
     public static native int retainNetworkInstance(String[] instanceNames);

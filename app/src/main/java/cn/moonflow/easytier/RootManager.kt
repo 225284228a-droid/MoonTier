@@ -22,7 +22,11 @@ object RootManager {
         "/system/bin/su",
         "/system/xbin/su",
         "/sbin/su",
+        "/debug_ramdisk/su",
         "/data/adb/ksu/bin/su",
+        "/data/adb/ap/bin/su",
+        "/data/adb/ap/su",
+        "/sbin/.magisk/busybox",
         "/data/adb/magisk/busybox"
     )
 
@@ -43,7 +47,7 @@ object RootManager {
 
     fun su(command: String, timeoutMs: Long = 8000): ShellResult {
         val suPath = probe().suPath
-        if (suPath.isBlank()) return ShellResult(1, "未检测到 root")
+        if (suPath.isBlank()) return ShellResult(1, "未检测到 Root 管理器授权")
         val cmd = if (suPath.endsWith("busybox")) {
             listOf(suPath, "su", "-c", command)
         } else {

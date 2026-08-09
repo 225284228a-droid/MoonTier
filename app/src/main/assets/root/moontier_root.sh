@@ -37,7 +37,8 @@ case "$ACTION" in
         fi
         rm -f "$PID_FILE"
         cd "$(dirname "$CORE")" || exit 1
-        nohup "$CORE" "$@" >"$LOG" 2>&1 &
+        : > "$LOG"
+        nohup "$CORE" "$@" >>"$LOG" 2>&1 &
         PID=$!
         echo "$PID" > "$PID_FILE"
         sleep 1

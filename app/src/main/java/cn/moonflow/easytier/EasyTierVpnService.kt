@@ -16,7 +16,9 @@ class EasyTierVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        AppDiagnostics.initialize(applicationContext, ConfigStore(applicationContext).loadSettings().coreLogLevel)
         if (intent?.action == ACTION_STOP) {
+            AppDiagnostics.event("vpn", "VPN service stop requested")
             shutdownVpn()
             stopSelf()
             return START_NOT_STICKY
@@ -24,6 +26,7 @@ class EasyTierVpnService : VpnService() {
 
         val json = intent?.getStringExtra(EXTRA_CONFIG).orEmpty()
         if (json.isBlank()) {
+            AppDiagnostics.warn("vpn", "VPN service started without configuration")
             shutdownVpn()
             stopSelf()
             return START_NOT_STICKY
@@ -34,6 +37,7 @@ class EasyTierVpnService : VpnService() {
 
         val config = runCatching { JSONObject(json) }.getOrNull()
         if (config == null) {
+            AppDiagnostics.warn("vpn", "VPN configuration JSON is invalid")
             shutdownVpn()
             stopSelf()
             return START_NOT_STICKY
@@ -42,6 +46,7 @@ class EasyTierVpnService : VpnService() {
         vpnInterface = createVpnInterface(config)
         val pfd = vpnInterface
         if (pfd == null) {
+            AppDiagnostics.error("vpn", "VPN interface creation returned null")
             shutdownVpn()
             stopSelf()
             return START_NOT_STICKY
@@ -51,16 +56,20 @@ class EasyTierVpnService : VpnService() {
         val code = NativeEasyTier.setTunFd(instanceName, pfd.fd)
         Log.i(TAG, "setTunFd(instance=$instanceName fd=${pfd.fd}) -> $code")
         if (code != 0) {
-            Log.e(TAG, "setTunFd failed: ${NativeEasyTier.getLastError().orEmpty()}")
+            val error = NativeEasyTier.getLastError().orEmpty()
+            Log.e(TAG, "setTunFd failed: $error")
+            AppDiagnostics.error("vpn", "setTunFd failed for $instanceName: $error")
             disconnect()
             NativeEasyTier.stopAllInstances()
             stopSelf()
             return START_NOT_STICKY
         }
+        AppDiagnostics.event("vpn", "VPN interface attached to $instanceName")
         return START_STICKY
     }
 
     override fun onRevoke() {
+        AppDiagnostics.warn("vpn", "VPN permission revoked by Android")
         shutdownVpn()
         stopSelf()
     }
@@ -87,6 +96,10 @@ class EasyTierVpnService : VpnService() {
                 "exitAuto=${config.optBoolean("exitNodeAutoRoutes", false)} " +
                 "exitNodes=${config.optInt("exitNodeReachableCount", 0)}/${config.optInt("exitNodeCount", 0)} " +
                 "preview=$routePreview"
+        )
+        AppDiagnostics.info(
+            "vpn",
+            "creating interface address=$address/$prefix mtu=$mtu routes=${routes?.length() ?: 0} exitAuto=${config.optBoolean("exitNodeAutoRoutes", false)}"
         )
 
         val builder = Builder()
@@ -129,6 +142,7 @@ class EasyTierVpnService : VpnService() {
         builder.establish()
     }.onFailure {
         Log.e(TAG, "createVpnInterface failed", it)
+        AppDiagnostics.error("vpn", "VPN interface creation failed", it)
     }.getOrNull()
 
     private fun disconnect() {

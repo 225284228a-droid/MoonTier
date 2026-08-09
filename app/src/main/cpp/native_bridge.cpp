@@ -71,6 +71,23 @@ JNI_OnLoad(JavaVM *, void *)
 
 // --- parseConfig ---
 
+extern "C" JNIEXPORT void JNICALL
+Java_cn_moonflow_easytier_NativeEasyTier_setLogLevel(JNIEnv *env, jclass, jstring level)
+{
+    const std::string requested = toString(env, level);
+    std::lock_guard<std::mutex> lock(ffiMutex);
+    if (requested == "debug") {
+        setenv("ET_CONSOLE_LOG_LEVEL", "debug", 1);
+        setenv("RUST_LOG", "CORE=debug,easytier=debug", 1);
+    } else if (requested == "normal") {
+        setenv("ET_CONSOLE_LOG_LEVEL", "warn", 1);
+        setenv("RUST_LOG", "CORE=warn,easytier=warn", 1);
+    } else {
+        setenv("ET_CONSOLE_LOG_LEVEL", "off", 1);
+        setenv("RUST_LOG", "off", 1);
+    }
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_parseConfig(JNIEnv *env, jclass, jstring config)
 {
@@ -85,8 +102,6 @@ extern "C" JNIEXPORT jint JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_runNetworkInstance(JNIEnv *env, jclass, jstring config)
 {
     const std::string cfg = toString(env, config);
-    setenv("ET_CONSOLE_LOG_LEVEL", "info", 1);
-    setenv("RUST_LOG", "CORE=info,easytier=info", 1);
     std::lock_guard<std::mutex> lock(ffiMutex);
     return run_network_instance(cfg.c_str());
 }

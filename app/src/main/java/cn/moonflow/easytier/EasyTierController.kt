@@ -43,6 +43,7 @@ class EasyTierController(
     fun start(config: NetworkConfig) {
         if (state.starting || state.stopping) return
         Log.i(TAG, "FFI start requested id=${config.id} running=${state.running}")
+        AppDiagnostics.event("ffi", "start requested id=${config.id} name=${config.displayName}")
         state = state.copy(starting = true, statusText = "正在启动 ${config.displayName}")
         scope.launch {
             val startedAt = SystemClock.elapsedRealtime()
@@ -60,25 +61,40 @@ class EasyTierController(
             state = RuntimeState(starting = true, statusText = "正在启动 ${normalized.displayName}")
 
             val toml = TomlCodec.build(runtimeConfig)
-            val parseCode = withContext(Dispatchers.IO) { NativeEasyTier.parseConfig(toml) }
+            val configuredLogLevel = CoreLogLevel.normalize(store.loadSettings().coreLogLevel)
+            val parseCode = runCatching {
+                withContext(Dispatchers.IO) {
+                    NativeEasyTier.setLogLevel(configuredLogLevel)
+                    NativeEasyTier.parseConfig(toml)
+                }
+            }.getOrElse { error ->
+                failStart("配置解析异常: ${error.message ?: "未知错误"}")
+                return@launch
+            }
             if (parseCode != 0) {
                 failStart("配置解析失败: ${NativeEasyTier.getLastError().orEmpty()}")
                 return@launch
             }
 
-            val code = withContext(Dispatchers.IO) { NativeEasyTier.runNetworkInstance(toml) }
+            val code = runCatching {
+                withContext(Dispatchers.IO) { NativeEasyTier.runNetworkInstance(toml) }
+            }.getOrElse { error ->
+                failStart("启动异常: ${error.message ?: "未知错误"}")
+                return@launch
+            }
             if (code != 0) {
                 failStart("启动失败: ${NativeEasyTier.getLastError().orEmpty()}")
                 return@launch
             }
             Log.i(TAG, "FFI core ${runtimeConfig.id} started in ${SystemClock.elapsedRealtime() - startedAt}ms")
+            AppDiagnostics.event("ffi", "core started id=${runtimeConfig.id} level=$configuredLogLevel elapsed=${SystemClock.elapsedRealtime() - startedAt}ms")
 
             state = state.copy(
                 running = true,
                 starting = false,
                 runningConfigId = runtimeConfig.id,
                 statusText = "实例运行中: ${normalized.displayName}",
-                logs = listOf("EasyTier 日志级别: info", "网络实例启动成功")
+                logs = listOf("EasyTier 日志级别: ${CoreLogLevel.label(configuredLogLevel)}", "网络实例启动成功")
             )
             if (previousConfigId.isNotBlank() && previousConfigId != runtimeConfig.id) {
                 store.updateConfigRunningState(previousConfigId, false)
@@ -117,12 +133,30 @@ class EasyTierController(
     }
 
     fun onVpnPermissionDenied() {
+        AppDiagnostics.warn("vpn", "VPN permission denied by user")
         scope.launch {
             stopRuntime(
                 statusText = "VPN 授权已取消",
                 logMessage = "VPN 授权已取消，网络实例已停止",
                 wait = false
             )
+        }
+    }
+
+    fun onVpnServiceStartFailed(error: Throwable) {
+        AppDiagnostics.error("vpn", "VPN service start failed", error)
+        scope.launch {
+            stopRuntime(
+                statusText = "启动失败",
+                logMessage = "VPN 服务启动失败: ${error.message ?: "未知错误"}",
+                wait = false
+            )
+        }
+    }
+
+    fun updateLogLevel(level: String) {
+        if (CoreLogLevel.normalize(level) == CoreLogLevel.OFF) {
+            state = state.copy(logs = emptyList())
         }
     }
 
@@ -138,6 +172,7 @@ class EasyTierController(
     }
 
     private suspend fun stopRuntime(statusText: String, logMessage: String, wait: Boolean) {
+        AppDiagnostics.event("ffi", "network stopped: $logMessage")
         val stoppedConfigId = state.runningConfigId.ifBlank { runningConfig?.id.orEmpty() }
         val poll = pollJob
         pollJob = null
@@ -172,6 +207,7 @@ class EasyTierController(
     }
 
     private fun failStart(message: String) {
+        AppDiagnostics.error("ffi", message)
         val configId = runningConfig?.id.orEmpty()
         pollJob?.cancel()
         pollJob = null
@@ -218,7 +254,8 @@ class EasyTierController(
         val localCidr = extractLocalCidr(info)
         val proxyCidrs = collectPeerProxyCidrs(info)
         val nodes = parseNodes(info)
-        val logs = collectNewLogs(info)
+        val settings = store.loadSettings()
+        val logs = filterCoreLogs(collectNewLogs(info), settings.coreLogLevel)
 
         var next = state.copy(
             running = true,
@@ -248,7 +285,6 @@ class EasyTierController(
             if (discoveredCoreIps.isNotEmpty()) {
                 directCoreIps = (directCoreIps + discoveredCoreIps).take(MAX_EXCLUDED_CORE_IPS).toSet()
             }
-            val settings = store.loadSettings()
             val configuredExitNodes = config.exitNodes.cleanItems()
             val reachableExitNodes = configuredExitNodes.filter {
                 normalizeExitNode(it) in collectRouteIps(info)
@@ -287,6 +323,7 @@ class EasyTierController(
         missedPolls += 1
         val threshold = if (state.localCidr.isBlank()) 60 else 2
         if (missedPolls < threshold) return
+        AppDiagnostics.warn("ffi", "instance disappeared: $message")
         val stoppedConfig = runningConfig
         val poll = pollJob
         pollJob = null
@@ -471,6 +508,12 @@ class EasyTierController(
         return fresh.map { it.second }
     }
 
+    private fun filterCoreLogs(logs: List<String>, level: String): List<String> = when (CoreLogLevel.normalize(level)) {
+        CoreLogLevel.OFF -> emptyList()
+        CoreLogLevel.NORMAL -> logs.filter { IMPORTANT_CORE_LOG.containsMatchIn(it) }
+        else -> logs
+    }
+
     private fun NetworkConfig.withRuntimeHostname(context: Context): NetworkConfig {
         if (hostname.isNotBlank() && !hostname.equals("localhost", ignoreCase = true)) return this
         return copy(hostname = defaultRuntimeHostname(context, id))
@@ -505,6 +548,10 @@ class EasyTierController(
         )
         private val P2P_EVENT_HINT = Regex(
             "hole.?punch|direct connect|udp|tcp|quic|stun|endpoint|candidate",
+            RegexOption.IGNORE_CASE
+        )
+        private val IMPORTANT_CORE_LOG = Regex(
+            "error|warn|fail|panic|closed|stop|disconnect|exit|timeout",
             RegexOption.IGNORE_CASE
         )
     }

@@ -105,6 +105,7 @@ class ConfigStore(private val context: Context) {
             darkMode = settings.darkMode,
             rootModeEnabled = settings.rootModeEnabled,
             coreAutoUpdate = settings.coreAutoUpdate,
+            coreLogLevel = settings.coreLogLevel,
             configServerUrl = settings.configServerUrl,
             configServerHostname = settings.configServerHostname,
             configServerMachineId = settings.configServerMachineId,
