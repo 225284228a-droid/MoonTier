@@ -21,3 +21,13 @@ local.properties
 *.hprof
 *.log
 captures/
+
+# Private signing material
+*.keystore
+*.jks
+keystore.properties
+
+# Local distribution and UI diagnostics
+dist/
+tools/moontier-*.xml
+tools/moontier-*.png

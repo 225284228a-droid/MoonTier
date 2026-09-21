@@ -3,6 +3,15 @@ plugins {
     id "org.jetbrains.kotlin.plugin.compose"
 }
 
+def signingProperties = new Properties()
+def signingPropertiesFile = rootProject.file("keystore.properties")
+if (signingPropertiesFile.exists()) {
+    signingPropertiesFile.withInputStream { signingProperties.load(it) }
+}
+def hasReleaseSigning = ["storeFile", "storePassword", "keyAlias", "keyPassword"].every {
+    signingProperties.getProperty(it)?.trim()
+}
+
 android {
     namespace = "cn.moonflow.easytier"
     compileSdk = 36
@@ -27,20 +36,22 @@ android {
     }
 
     signingConfigs {
-        release {
-            storeFile = file("../qtet-release.keystore")
-            storePassword = "REMOVED_PRIVATE_SIGNING_PASSWORD"
-            keyAlias = "qtet"
-            keyPassword = "REMOVED_PRIVATE_SIGNING_PASSWORD"
+        if (hasReleaseSigning) {
+            release {
+                storeFile = rootProject.file(signingProperties.getProperty("storeFile"))
+                storePassword = signingProperties.getProperty("storePassword")
+                keyAlias = signingProperties.getProperty("keyAlias")
+                keyPassword = signingProperties.getProperty("keyPassword")
+            }
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.release
+            if (hasReleaseSigning) signingConfig = signingConfigs.release
         }
         release {
-            signingConfig = signingConfigs.release
+            if (hasReleaseSigning) signingConfig = signingConfigs.release
             minifyEnabled = false
         }
     }
