@@ -14,11 +14,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -39,6 +40,10 @@ class RootTierController(private val context: Context) {
     private val managerMetaFile = File(metaDir, "manager.json")
     private val managerMutex = Mutex()
     private var pollJob: Job? = null
+    private val pollWake = Channel<Unit>(Channel.CONFLATED)
+    private var foreground = true
+    private var operationGeneration = 0L
+    @Volatile private var shutdownGeneration = 0L
     private var lastRootCidr = ""
     private var lastRootExitRoute = false
 
@@ -50,17 +55,24 @@ class RootTierController(private val context: Context) {
         ensureScript()
         refreshCoreState()
         scope.launch {
+            val shutdown = shutdownGeneration
+            val generation = operationGeneration
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    managerMutex.withLock { initializeBlocking() }
+                    managerMutex.withLock {
+                        check(shutdown == shutdownGeneration) { "Root manager 初始化已取消" }
+                        initializeBlocking()
+                    }
                 }
             }
             result.onSuccess { refreshed ->
+                if (shutdown != shutdownGeneration || generation != operationGeneration) return@onSuccess
                 state = state.copy(
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
             }.onFailure { error ->
+                if (shutdown != shutdownGeneration || generation != operationGeneration) return@onFailure
                 Log.e(TAG, "Root manager initialization failed", error)
                 if (!isFullConfigServerUrl(state.configServer.serverUrl)) return@onFailure
                 state = state.copy(
@@ -76,6 +88,12 @@ class RootTierController(private val context: Context) {
     fun release() {
         pollJob?.cancel()
         scope.cancel()
+    }
+
+    fun updatePollingConditions(isForeground: Boolean) {
+        if (foreground == isForeground) return
+        foreground = isForeground
+        if (isForeground) pollWake.trySend(Unit)
     }
 
     fun diagnosticLogTail(): List<String> = readManagerLogTail(loadManagerOptions())
@@ -199,6 +217,8 @@ class RootTierController(private val context: Context) {
         val existing = state.instances.firstOrNull { it.configId == config.id }
         if (existing?.running == true || existing?.starting == true || existing?.stopping == true) return
 
+        operationGeneration++
+        val shutdown = shutdownGeneration
         Log.i(TAG, "Root manager start requested id=${config.id}")
         AppDiagnostics.event("root", "network start requested id=${config.id} name=${config.displayName}")
         val starting = RootInstanceState(
@@ -213,10 +233,15 @@ class RootTierController(private val context: Context) {
             val startedAt = SystemClock.elapsedRealtime()
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    managerMutex.withLock { startBlocking(config) }
+                    managerMutex.withLock {
+                        check(shutdown == shutdownGeneration) { "Root 实例启动已取消" }
+                        startBlocking(config)
+                    }
                 }
             }
             result.onSuccess { refreshed ->
+                if (shutdown != shutdownGeneration) return@onSuccess
+                operationGeneration++
                 Log.i(TAG, "Root instance ${config.id} started in ${SystemClock.elapsedRealtime() - startedAt}ms")
                 AppDiagnostics.event("root", "network started id=${config.id} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms")
                 state = state.copy(
@@ -224,6 +249,8 @@ class RootTierController(private val context: Context) {
                     configServer = refreshed.configServer
                 )
             }.onFailure { error ->
+                if (shutdown != shutdownGeneration) return@onFailure
+                operationGeneration++
                 Log.e(TAG, "Root instance ${config.id} failed", error)
                 AppDiagnostics.error("root", "network start failed id=${config.id}", error)
                 state = state.copy(
@@ -246,6 +273,8 @@ class RootTierController(private val context: Context) {
     fun stop(configId: String) {
         val instance = state.instances.firstOrNull { it.configId == configId } ?: return
         if (instance.stopping) return
+        operationGeneration++
+        val shutdown = shutdownGeneration
         AppDiagnostics.event("root", "network stop requested id=$configId")
         state = state.copy(
             instances = state.instances.map {
@@ -255,16 +284,23 @@ class RootTierController(private val context: Context) {
         scope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    managerMutex.withLock { stopBlocking(configId) }
+                    managerMutex.withLock {
+                        check(shutdown == shutdownGeneration) { "Root 实例停止已取消" }
+                        stopBlocking(configId)
+                    }
                 }
             }
             result.onSuccess { refreshed ->
+                if (shutdown != shutdownGeneration) return@onSuccess
+                operationGeneration++
                 AppDiagnostics.event("root", "network stopped id=$configId")
                 state = state.copy(
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
             }.onFailure { error ->
+                if (shutdown != shutdownGeneration) return@onFailure
+                operationGeneration++
                 AppDiagnostics.error("root", "network stop failed id=$configId", error)
                 state = state.copy(
                     instances = state.instances.map {
@@ -280,16 +316,28 @@ class RootTierController(private val context: Context) {
     }
 
     fun stopAll() {
-        if (state.instances.isEmpty() && !state.configServer.running && !managerPidFile.exists()) return
+        scope.launch {
+            runCatching { stopAllAndWait() }.onFailure { error ->
+                AppDiagnostics.error("root", "shared manager stop failed", error)
+            }
+        }
+    }
+
+    suspend fun stopAllAndWait() {
+        operationGeneration++
+        shutdownGeneration++
         AppDiagnostics.event("root", "shared manager stop requested")
         state = state.copy(
             instances = state.instances.map { it.copy(stopping = true, starting = false) },
             configServer = state.configServer.copy(stopping = true, starting = false)
         )
-        scope.launch {
+        try {
             withContext(Dispatchers.IO) {
-                managerMutex.withLock { stopManagerBlocking() }
+                managerMutex.withLock {
+                    if (managerPidFile.exists()) stopManagerBlocking() else removeRootRouting()
+                }
             }
+            operationGeneration++
             state = state.copy(
                 instances = emptyList(),
                 configServer = state.configServer.copy(
@@ -302,12 +350,21 @@ class RootTierController(private val context: Context) {
                 )
             )
             AppDiagnostics.event("root", "shared manager stopped")
+        } catch (error: Exception) {
+            operationGeneration++
+            state = state.copy(
+                instances = state.instances.map { it.copy(stopping = false, error = error.message ?: "停止失败") },
+                configServer = state.configServer.copy(stopping = false, error = error.message ?: "停止失败")
+            )
+            throw error
         }
     }
 
     fun startConfigServer(settings: AppSettings) {
         val current = state.configServer
         if (current.running || current.starting || current.stopping) return
+        operationGeneration++
+        val shutdown = shutdownGeneration
         state = state.copy(
             configServer = current.copy(
                 starting = true,
@@ -320,15 +377,22 @@ class RootTierController(private val context: Context) {
         scope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    managerMutex.withLock { startConfigServerBlocking(settings) }
+                    managerMutex.withLock {
+                        check(shutdown == shutdownGeneration) { "配置服务器启动已取消" }
+                        startConfigServerBlocking(settings)
+                    }
                 }
             }
             result.onSuccess { refreshed ->
+                if (shutdown != shutdownGeneration) return@onSuccess
+                operationGeneration++
                 state = state.copy(
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
             }.onFailure { error ->
+                if (shutdown != shutdownGeneration) return@onFailure
+                operationGeneration++
                 Log.e(TAG, "Config server start failed", error)
                 state = state.copy(
                     configServer = state.configServer.copy(
@@ -344,19 +408,28 @@ class RootTierController(private val context: Context) {
     fun stopConfigServer() {
         val current = state.configServer
         if (!current.running && !current.starting && !current.stopping) return
+        operationGeneration++
+        val shutdown = shutdownGeneration
         state = state.copy(configServer = current.copy(stopping = true, starting = false))
         scope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    managerMutex.withLock { stopConfigServerBlocking() }
+                    managerMutex.withLock {
+                        check(shutdown == shutdownGeneration) { "配置服务器停止已取消" }
+                        stopConfigServerBlocking()
+                    }
                 }
             }
             result.onSuccess { refreshed ->
+                if (shutdown != shutdownGeneration) return@onSuccess
+                operationGeneration++
                 state = state.copy(
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
             }.onFailure { error ->
+                if (shutdown != shutdownGeneration) return@onFailure
+                operationGeneration++
                 state = state.copy(
                     configServer = state.configServer.copy(
                         stopping = false,
@@ -573,7 +646,11 @@ class RootTierController(private val context: Context) {
             append(' ')
             append(shq(managerPidFile.absolutePath))
         }
-        RootManager.su(command, timeoutMs = 12000)
+        val pid = managerPid()
+        val result = RootManager.su(command, timeoutMs = 12000)
+        if (!result.success || isAlive(pid)) {
+            throw IllegalStateException(managerError(result, "共享 manager 停止失败"))
+        }
         managerPidFile.delete()
     }
 
@@ -659,12 +736,14 @@ class RootTierController(private val context: Context) {
     private suspend fun pollLoop() {
         while (true) {
             refreshStates()
-            delay(if (state.instances.any { it.localCidr.isBlank() } || state.configServer.starting) 1000 else 3000)
+            pollWake.tryReceive()
+            withTimeoutOrNull(if (foreground) 1000L else 5000L) { pollWake.receive() }
         }
     }
 
     private suspend fun refreshStates() {
         if (!managerPidFile.exists() && state.instances.isEmpty() && !state.configServer.running) return
+        val generation = operationGeneration
         val result = runCatching {
             withContext(Dispatchers.IO) {
                 managerMutex.withLock {
@@ -683,8 +762,11 @@ class RootTierController(private val context: Context) {
             }
         }
         result.onSuccess { refreshed ->
+            if (generation != operationGeneration ||
+                state.instances.any { it.starting || it.stopping } ||
+                state.configServer.starting || state.configServer.stopping) return@onSuccess
             if (refreshed == null) {
-                val wasExpected = state.instances.any { it.stopping } || state.configServer.stopping
+                if (state.instances.isEmpty() && !state.configServer.running) return@onSuccess
                 state = state.copy(
                     instances = emptyList(),
                     configServer = state.configServer.copy(
@@ -693,7 +775,7 @@ class RootTierController(private val context: Context) {
                         starting = false,
                         stopping = false,
                         connected = false,
-                        error = if (wasExpected) "" else "共享 manager 已退出"
+                        error = "共享 manager 已退出"
                     )
                 )
             } else {
@@ -826,37 +908,7 @@ class RootTierController(private val context: Context) {
         val myNode = info.optJSONObjectCompat("my_node_info", "myNodeInfo")
         val virtualIpv4 = myNode?.optJSONObjectCompat("virtual_ipv4", "virtualIpv4")
         val localCidr = ipv4Cidr(virtualIpv4)
-        val nodes = ArrayList<NodeInfo>()
-        if (myNode != null) {
-            nodes += NodeInfo(
-                hostname = myNode.optString("hostname").ifBlank { "本机" },
-                ip = localCidr.substringBefore("/"),
-                role = "本机",
-                latencyMs = 0,
-                local = true
-            )
-        }
-
-        val routes = info.optJSONArray("routes") ?: JSONArray()
-        for (index in 0 until routes.length()) {
-            val route = routes.optJSONObject(index) ?: continue
-            val cidr = ipv4Cidr(route.optJSONObjectCompat("ipv4_addr", "ipv4Addr"))
-            val isServer = route.optJSONObjectCompat("feature_flag", "featureFlag")
-                ?.optBooleanCompat("is_public_server", "isPublicServer") == true
-            val cost = route.optInt("cost", 1)
-            val role = when {
-                isServer -> "服务器"
-                cost > 1 -> "中继($cost)"
-                else -> "直连"
-            }
-            nodes += NodeInfo(
-                hostname = route.optString("hostname").ifBlank { if (isServer) "公共服务器" else role },
-                ip = cidr.substringBefore("/"),
-                role = role,
-                latencyMs = route.optIntCompat("path_latency", "pathLatency", -1),
-                local = false
-            )
-        }
+        val nodes = parseNodes(info)
 
         val events = info.optJSONArray("events") ?: JSONArray()
         val logs = ArrayList<String>()
@@ -877,7 +929,7 @@ class RootTierController(private val context: Context) {
         return ParsedInstanceInfo(
             running = info.optBoolean("running", true),
             localCidr = localCidr,
-            nodes = nodes.distinctBy { "${it.local}-${it.ip}-${it.hostname}" },
+            nodes = nodes,
             logs = logs.takeLast(80),
             error = info.optStringCompat("error_msg", "errorMsg")
         )
@@ -1251,9 +1303,6 @@ class RootTierController(private val context: Context) {
 private fun JSONObject?.optJSONObjectCompat(primary: String, fallback: String): JSONObject? =
     this?.optJSONObject(primary) ?: this?.optJSONObject(fallback)
 
-private fun JSONObject.optBooleanCompat(primary: String, fallback: String): Boolean =
-    if (has(primary)) optBoolean(primary) else optBoolean(fallback)
-
 private fun JSONObject.optIntCompat(primary: String, fallback: String, default: Int): Int =
     when {
         has(primary) -> optInt(primary, default)
@@ -1261,5 +1310,6 @@ private fun JSONObject.optIntCompat(primary: String, fallback: String, default: 
         else -> default
     }
 
-private fun JSONObject.optStringCompat(primary: String, fallback: String): String =
-    optString(primary).ifBlank { optString(fallback) }
+internal fun JSONObject.optStringCompat(primary: String, fallback: String): String =
+    (opt(primary) as? String)?.takeIf { it.isNotBlank() }
+        ?: (opt(fallback) as? String).orEmpty()

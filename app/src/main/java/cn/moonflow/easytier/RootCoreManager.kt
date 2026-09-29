@@ -212,6 +212,6 @@ class RootCoreManager(private val context: Context) {
     }
 
     companion object {
-        private const val MANAGER_CLIENT_VERSION = "1"
+        private const val MANAGER_CLIENT_VERSION = "2"
     }
 }

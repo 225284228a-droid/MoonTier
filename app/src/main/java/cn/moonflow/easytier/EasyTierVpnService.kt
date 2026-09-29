@@ -11,70 +11,80 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import org.json.JSONObject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 
 class EasyTierVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var attachJob: Job? = null
+    private var instanceId = ""
+    private var generation = -1L
+    private val controller by lazy { EasyTierController.get(applicationContext) }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        AppDiagnostics.initialize(applicationContext, ConfigStore(applicationContext).loadSettings().coreLogLevel)
-        if (intent?.action == ACTION_STOP) {
-            AppDiagnostics.event("vpn", "VPN service stop requested")
-            shutdownVpn()
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        val json = intent?.getStringExtra(EXTRA_CONFIG).orEmpty()
-        if (json.isBlank()) {
-            AppDiagnostics.warn("vpn", "VPN service started without configuration")
-            shutdownVpn()
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
         startForeground(NOTIFICATION_ID, createNotification())
-        disconnect()
-
-        val config = runCatching { JSONObject(json) }.getOrNull()
-        if (config == null) {
-            AppDiagnostics.warn("vpn", "VPN configuration JSON is invalid")
+        if (intent?.action == ACTION_STOP) {
             shutdownVpn()
             stopSelf()
             return START_NOT_STICKY
         }
-
-        vpnInterface = createVpnInterface(config)
-        val pfd = vpnInterface
-        if (pfd == null) {
-            AppDiagnostics.error("vpn", "VPN interface creation returned null")
-            shutdownVpn()
-            stopSelf()
+        val config = runCatching { JSONObject(intent?.getStringExtra(EXTRA_CONFIG).orEmpty()) }.getOrNull()
+        val id = config?.stringValue("instanceId").orEmpty()
+        val token = config?.optLong("generation", -1L) ?: -1L
+        if (config == null || !controller.acceptsVpnRequest(id, token)) {
+            if (vpnInterface == null) stopSelfResult(startId)
             return START_NOT_STICKY
         }
-
-        val instanceName = config.optString("instanceName")
-        val code = NativeEasyTier.setTunFd(instanceName, pfd.fd)
-        Log.i(TAG, "setTunFd(instance=$instanceName fd=${pfd.fd}) -> $code")
-        if (code != 0) {
-            val error = NativeEasyTier.getLastError().orEmpty()
-            Log.e(TAG, "setTunFd failed: $error")
-            AppDiagnostics.error("vpn", "setTunFd failed for $instanceName: $error")
+        val previous = attachJob
+        attachJob = serviceScope.launch {
+            previous?.cancelAndJoin()
+            if (!controller.acceptsVpnRequest(id, token)) return@launch
             disconnect()
-            NativeEasyTier.stopAllInstances()
-            stopSelf()
-            return START_NOT_STICKY
+            instanceId = id
+            generation = token
+            val pfd = createVpnInterface(config)
+            if (pfd == null) {
+                controller.onVpnServiceStartFailed(IllegalStateException("无法创建 VPN 接口"))
+                stopSelfResult(startId)
+                return@launch
+            }
+            vpnInterface = pfd
+            try {
+                controller.attachTunFd(id, token, config.getString("instanceName"), pfd.fd)
+                if (!controller.acceptsVpnRequest(id, token)) {
+                    if (vpnInterface === pfd) disconnect()
+                    return@launch
+                }
+                controller.onVpnAttached(id, token)
+                AppDiagnostics.event("vpn", "VPN interface attached to $id")
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                if (vpnInterface === pfd) disconnect()
+                throw error
+            } catch (error: Throwable) {
+                if (vpnInterface === pfd) disconnect()
+                controller.onVpnServiceStartFailed(error)
+                stopSelfResult(startId)
+            }
         }
-        AppDiagnostics.event("vpn", "VPN interface attached to $instanceName")
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onRevoke() {
         AppDiagnostics.warn("vpn", "VPN permission revoked by Android")
+        controller.onVpnClosed(instanceId, generation, revoked = true)
         shutdownVpn()
         stopSelf()
     }
 
     override fun onDestroy() {
+        serviceScope.cancel()
+        controller.onVpnClosed(instanceId, generation, revoked = false)
         shutdownVpn()
         super.onDestroy()
     }
@@ -145,20 +155,32 @@ class EasyTierVpnService : VpnService() {
         AppDiagnostics.error("vpn", "VPN interface creation failed", it)
     }.getOrNull()
 
-    private fun disconnect() {
+    private suspend fun disconnect() {
+        controller.detachTunFd(instanceId, generation)
         vpnInterface?.close()
         vpnInterface = null
     }
 
     private fun shutdownVpn() {
-        disconnect()
-        NativeEasyTier.stopAllInstances()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
+        val pending = attachJob
+        attachJob = null
+        pending?.cancel()
+        val descriptor = vpnInterface
+        vpnInterface = null
+        val closingId = instanceId
+        val closingGeneration = generation
+        instanceId = ""
+        generation = -1L
+        // JNI may be waiting for the FFI lock before the native side duplicates this fd.
+        CoroutineScope(Dispatchers.Main.immediate).launch {
+            pending?.join()
+            try {
+                controller.detachTunFd(closingId, closingGeneration)
+            } finally {
+                descriptor?.close()
+            }
         }
+        stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     private fun createNotification(): Notification {

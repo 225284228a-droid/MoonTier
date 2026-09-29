@@ -3,7 +3,7 @@
 基于 EasyTier 的原生 Android 组网客户端，使用 Kotlin、Jetpack Compose 和 C++ JNI 构建。
 
 - Android 7.0（API 24）及以上，支持 arm64-v8a。
-- VPN 模式：通过 Android VpnService 和 EasyTier FFI 运行。
+- VPN 模式：通过 Android VpnService 和 EasyTier FFI 运行，支持配置服务器下发网络。
 - Root 模式：管理独立 EasyTier 核心，支持下载安装与本地导入。
 - 提供网络配置、配置服务器、节点状态、路由及诊断日志界面。
 - 应用包名：`cn.moonflow.easytier`。
@@ -26,6 +26,13 @@ APK 输出目录为 `app/build/outputs/apk/`。
 配置后 debug 和 release 使用所配置的签名。请勿提交私钥和密码。
 
 Root manager 的源码与构建说明见 [tools/root-manager-client](tools/root-manager-client/README.md)。
+FFI 核心的固定源码版本、Android 适配补丁及构建步骤见 [tools/ffi-runtime](tools/ffi-runtime/README.md)。
+
+```sh
+gradle testDebugUnitTest lintDebug assembleDebug
+```
+
+本次自动化验证结果与待完成的实机验收见 [运行时与界面验收记录](docs/runtime-ui-validation.md)。
 
 ## 开源许可与致谢
 

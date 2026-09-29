@@ -6,6 +6,7 @@ build/
 .cxx/
 .externalNativeBuild/
 tools/**/target/
+tools/ffi-runtime/upstream/
 
 # Local IDE and machine state
 local.properties

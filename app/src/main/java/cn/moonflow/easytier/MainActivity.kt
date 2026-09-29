@@ -14,7 +14,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateDpAsState
@@ -118,8 +117,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -129,7 +128,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var store: ConfigStore
     private lateinit var controller: EasyTierController
     private lateinit var rootController: RootTierController
-    private var pendingVpnConfig: String? = null
+    private var pendingVpnConfig by mutableStateOf<String?>(null)
     private var pendingExportText: String = ""
     private var pendingDiagnosticText: String = ""
     private var onImportedConfig: ((NetworkConfig) -> Unit)? = null
@@ -141,10 +140,10 @@ class MainActivity : ComponentActivity() {
         val vpnConfig = pendingVpnConfig
         if (result.resultCode == Activity.RESULT_OK) {
             AppDiagnostics.event("vpn", "VPN permission granted")
-            vpnConfig?.let { startVpnServiceWith(it) }
+            controller.onVpnPermissionGranted()
         } else if (vpnConfig != null) {
             AppDiagnostics.warn("vpn", "VPN permission denied")
-            controller.onVpnPermissionDenied()
+            controller.onVpnPermissionDenied(vpnConfig)
         }
         pendingVpnConfig = null
     }
@@ -205,17 +204,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingVpnConfig = savedInstanceState?.getString("pending_vpn_permission")
         store = ConfigStore(applicationContext)
         AppDiagnostics.initialize(applicationContext, store.loadSettings().coreLogLevel)
         installUncaughtExceptionHandler()
         AppDiagnostics.event("launcher", "MainActivity created")
-        controller = EasyTierController(applicationContext, store, ::requestVpn)
+        controller = EasyTierController.get(applicationContext)
         rootController = RootTierController(applicationContext)
 
         window.attributes = window.attributes.apply { preferredRefreshRate = 120f }
 
         setContent {
-            // 动态轮询：前台 30s，后台 2min
+            LaunchedEffect(isForeground, controller.pendingVpnConfig, pendingVpnConfig) {
+                if (isForeground && pendingVpnConfig == null) controller.pendingVpnConfig?.let(::requestVpn)
+            }
             MoonTierApp(
                 isForeground = isForeground,
                 store = store,
@@ -239,16 +241,28 @@ class MainActivity : ComponentActivity() {
         }
 
         lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) { isForeground = true }
-            override fun onStop(owner: LifecycleOwner) { isForeground = false }
+            override fun onStart(owner: LifecycleOwner) {
+                isForeground = true
+                controller.updatePollingConditions(true)
+                rootController.updatePollingConditions(true)
+            }
+            override fun onStop(owner: LifecycleOwner) {
+                isForeground = false
+                controller.updatePollingConditions(false)
+                rootController.updatePollingConditions(false)
+            }
         })
     }
 
     override fun onDestroy() {
         AppDiagnostics.event("launcher", "MainActivity destroyed")
-        controller.release()
         rootController.release()
         super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("pending_vpn_permission", pendingVpnConfig)
+        super.onSaveInstanceState(outState)
     }
 
     private fun requestVpn(vpnJson: String) {
@@ -262,17 +276,8 @@ class MainActivity : ComponentActivity() {
             runCatching { vpnPermissionLauncher.launch(intent) }
                 .onFailure { controller.onVpnServiceStartFailed(it) }
         } else {
-            startVpnServiceWith(vpnJson)
+            controller.onVpnPermissionGranted()
         }
-    }
-
-    private fun startVpnServiceWith(vpnJson: String) {
-        runCatching {
-            val intent = Intent(this, EasyTierVpnService::class.java)
-                .putExtra(EasyTierVpnService.EXTRA_CONFIG, vpnJson)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
-            AppDiagnostics.event("vpn", "VPN service start requested")
-        }.onFailure { controller.onVpnServiceStartFailed(it) }
     }
 
     private fun installUncaughtExceptionHandler() {
@@ -366,6 +371,11 @@ private fun MoonTierApp(
     var configs by remember { mutableStateOf(store.loadConfigs()) }
     var userServers by remember { mutableStateOf(store.loadUserServers()) }
     var officialServers by remember { mutableStateOf(store.loadOfficialServers()) }
+    var officialSyncJob by remember { mutableStateOf<Job?>(null) }
+    var officialSyncInProgress by remember { mutableStateOf(false) }
+    var officialSyncMessage by remember { mutableStateOf<String?>(null) }
+    var officialSyncFailed by remember { mutableStateOf(false) }
+    var modeSwitching by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var editingConfig by remember { mutableStateOf<NetworkConfig?>(null) }
     var dialog by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -389,16 +399,28 @@ private fun MoonTierApp(
     }
 
     fun saveSettings(next: AppSettings) {
+        if (modeSwitching) return
         val logLevelChanged = CoreLogLevel.normalize(next.coreLogLevel) != CoreLogLevel.normalize(settings.coreLogLevel)
         if (next.rootModeEnabled != settings.rootModeEnabled) {
-            if (next.rootModeEnabled) {
-                controller.stop()
-            } else {
-                rootController.stopAll()
+            modeSwitching = true
+            scope.launch {
+                try {
+                    if (next.rootModeEnabled) controller.stopAllAndWait() else rootController.stopAllAndWait()
+                    val updated = store.loadSettings().copy(rootModeEnabled = next.rootModeEnabled)
+                    store.saveSettings(updated)
+                    settings = updated
+                    if (!updated.rootModeEnabled) controller.attachIfRunning(configs)
+                } catch (error: Exception) {
+                    dialog = "模式切换失败" to (error.message ?: "原网络尚未停止")
+                } finally {
+                    modeSwitching = false
+                }
             }
+            return
         }
-        settings = next
-        store.saveSettings(next)
+        val updated = next.copy(ffiConfigServerUrl = store.loadSettings().ffiConfigServerUrl)
+        settings = updated
+        store.saveSettings(updated)
         AppDiagnostics.configure(next.coreLogLevel)
         if (logLevelChanged) {
             controller.updateLogLevel(next.coreLogLevel)
@@ -420,8 +442,37 @@ private fun MoonTierApp(
         }
     }
 
+    fun syncOfficialServers() {
+        if (officialSyncInProgress || officialSyncJob?.isActive == true) return
+        officialSyncInProgress = true
+        officialSyncMessage = null
+        officialSyncJob = scope.launch {
+            try {
+                runCatching {
+                    val result = store.syncOfficialServers()
+                    result to store.loadOfficialServers()
+                }.onSuccess { (result, servers) ->
+                    officialServers = servers
+                    officialSyncFailed = false
+                    officialSyncMessage = "已同步 ${result.count} 个服务器"
+                }.onFailure { error ->
+                    officialSyncFailed = true
+                    officialSyncMessage = error.message ?: "无法同步官方源"
+                }
+            } finally {
+                officialSyncInProgress = false
+                officialSyncJob = null
+            }
+        }
+    }
+
     LaunchedEffect(isForeground, nodesExpanded) {
         controller.updatePollingConditions(isForeground, nodesExpanded)
+        rootController.updatePollingConditions(isForeground)
+    }
+
+    LaunchedEffect(controller.configServerState.serverUrl) {
+        settings = settings.copy(ffiConfigServerUrl = store.loadSettings().ffiConfigServerUrl)
     }
 
     LaunchedEffect(Unit) {
@@ -438,8 +489,7 @@ private fun MoonTierApp(
     LaunchedEffect(Unit) {
         controller.attachIfRunning(configs)
         if (settings.autoSyncOfficialServers) {
-            runCatching { store.syncOfficialServers() }
-                .onSuccess { officialServers = store.loadOfficialServers() }
+            syncOfficialServers()
         }
     }
 
@@ -471,7 +521,19 @@ private fun MoonTierApp(
 
     ApplySystemBars(palette, settings.darkMode)
 
-    MaterialTheme(colorScheme = if (settings.darkMode) darkColorScheme() else lightColorScheme()) {
+    MaterialTheme(
+        colorScheme = (if (settings.darkMode) darkColorScheme() else lightColorScheme()).copy(
+            primary = palette.accent,
+            onPrimary = palette.onAccent,
+            secondary = palette.secondaryButton,
+            onSecondary = palette.text,
+            surface = palette.surface,
+            background = palette.background,
+            onSurface = palette.text,
+            outline = palette.border,
+            error = palette.error
+        )
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -480,8 +542,8 @@ private fun MoonTierApp(
             AnimatedContent(
                 targetState = editingConfig,
                 transitionSpec = {
-                    (fadeIn(tween(180)) + scaleIn(initialScale = 0.92f, animationSpec = tween(240)) + fadeIn(tween(240)))
-                        .togetherWith(fadeOut(tween(130)) + scaleOut(targetScale = 0.92f, animationSpec = tween(180)))
+                    (fadeIn(tween(220)) + scaleIn(initialScale = 0.94f, animationSpec = tween(220)))
+                        .togetherWith(fadeOut(tween(220)) + scaleOut(targetScale = 0.94f, animationSpec = tween(220)))
                 },
                 label = "screen"
             ) { editing ->
@@ -514,6 +576,9 @@ private fun MoonTierApp(
                         configs = configs,
                         settings = settings,
                         runtime = runtime,
+                        ffiInstances = controller.instances,
+                        ffiConfigServer = controller.configServerState,
+                        vpnPermissionRequired = controller.vpnPermissionRequired,
                         rootController = rootController,
                         rootAvailable = rootAvailable,
                         rootChecking = rootChecking,
@@ -525,6 +590,8 @@ private fun MoonTierApp(
                         officialServers = officialServers,
                         onStart = { controller.start(it) },
                         onStop = { controller.stop() },
+                        onRequestVpnAuthorization = { controller.requestVpnAuthorization() },
+                        onSetFfiInstanceEnabled = { id, enabled -> controller.setInstanceEnabled(id, enabled) },
                         onEdit = { editingConfig = it },
                         onNewConfig = {
                             editingConfig = NetworkConfig.defaultConfig(default = configs.isEmpty()).copy(
@@ -537,6 +604,7 @@ private fun MoonTierApp(
                             if (settings.rootModeEnabled) rootController.stop(it.id)
                             if (!settings.rootModeEnabled && runtime.runningConfigId == it.id) controller.stop()
                             store.deleteConfig(it.id)
+                            if (!settings.rootModeEnabled) controller.forgetConfig(it.id)
                             reloadAll()
                         },
                         onDefaultConfig = {
@@ -558,17 +626,10 @@ private fun MoonTierApp(
                         onSettings = {
                             saveSettings(it)
                         },
-                        onSyncOfficial = {
-                            scope.launch {
-                                runCatching { store.syncOfficialServers() }
-                                    .onSuccess {
-                                        reloadAll()
-                                        dialog = "同步完成" to it.message
-                                    }.onFailure {
-                                        dialog = "同步失败" to (it.message ?: "无法同步官方源")
-                                    }
-                            }
-                        },
+                        onSyncOfficial = ::syncOfficialServers,
+                        officialSyncInProgress = officialSyncInProgress,
+                        officialSyncMessage = officialSyncMessage,
+                        officialSyncFailed = officialSyncFailed,
                         onDownloadUsers = { source ->
                             scope.launch {
                                 runCatching { store.downloadUserServers(source) }
@@ -582,12 +643,15 @@ private fun MoonTierApp(
                         },
                         onConnectConfigServer = {
                             if (!isFullConfigServerUrl(settings.configServerUrl)) {
-                                dialog = "网页控制台" to "请填写完整配置服务器 URL，例如 udp://host:22020/admin"
+                                dialog = "配置服务器" to "请填写完整配置服务器 URL，例如 udp://host:22020/admin"
                             } else {
                                 rootController.startConfigServer(settings)
                             }
                         },
                         onDisconnectConfigServer = { rootController.stopConfigServer() },
+                        onSaveFfiConfigServer = { url ->
+                            controller.configureConfigServer(url)
+                        },
                         onImportCoreZip = importCoreZip,
                         onExportDiagnostics = {
                             exportDiagnostics(
@@ -603,6 +667,15 @@ private fun MoonTierApp(
                 }
             }
 
+            if (modeSwitching) {
+                Box(
+                    Modifier.fillMaxSize().background(palette.background.copy(alpha = 0.85f))
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {},
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("正在切换模式", color = palette.text, fontSize = 16.sp)
+                }
+            }
             dialog?.let { (title, body) ->
                 AppleToast(
                     title = title,
@@ -643,6 +716,9 @@ private fun MainTabs(
     configs: List<NetworkConfig>,
     settings: AppSettings,
     runtime: RuntimeState,
+    ffiInstances: List<FfiInstanceState>,
+    ffiConfigServer: RootConfigServerState,
+    vpnPermissionRequired: Boolean,
     rootController: RootTierController,
     rootAvailable: Boolean,
     rootChecking: Boolean,
@@ -654,6 +730,8 @@ private fun MainTabs(
     officialServers: List<ServerEntry>,
     onStart: (NetworkConfig) -> Unit,
     onStop: () -> Unit,
+    onRequestVpnAuthorization: () -> Unit,
+    onSetFfiInstanceEnabled: (String, Boolean) -> Unit,
     onEdit: (NetworkConfig) -> Unit,
     onNewConfig: () -> Unit,
     onImportToml: () -> Unit,
@@ -664,9 +742,13 @@ private fun MainTabs(
     onAddOfficialServer: (ServerEntry) -> Unit,
     onSettings: (AppSettings) -> Unit,
     onSyncOfficial: () -> Unit,
+    officialSyncInProgress: Boolean,
+    officialSyncMessage: String?,
+    officialSyncFailed: Boolean,
     onDownloadUsers: (String) -> Unit,
     onConnectConfigServer: () -> Unit,
     onDisconnectConfigServer: () -> Unit,
+    onSaveFfiConfigServer: (String) -> Unit,
     onImportCoreZip: () -> Unit,
     onExportDiagnostics: () -> Unit
 ) {
@@ -702,15 +784,14 @@ private fun MainTabs(
             AnimatedContent(
                 targetState = selectedTab,
                 transitionSpec = {
-                    val dir = if (targetState > initialState) 1 else -1
-                    (fadeIn(tween(170)) + scaleIn(initialScale = 0.94f, animationSpec = tween(230)) + fadeIn(tween(230)))
-                        .togetherWith(fadeOut(tween(120)) + scaleOut(targetScale = 0.94f, animationSpec = tween(190)))
+                    (fadeIn(tween(220)) + scaleIn(initialScale = 0.94f, animationSpec = tween(220)))
+                        .togetherWith(fadeOut(tween(220)) + scaleOut(targetScale = 0.94f, animationSpec = tween(220)))
                 },
                 label = "tab"
             ) { index ->
                 when (index) {
-                    0 -> NetworkPage(palette, configs, runtime, nodesExpanded, onNodesExpandedChange, onStart, onStop, onEdit, rootController, rootAvailable, rootMode, rootSelectedConfigId, onRootConfigSelected)
-                    1 -> ProfilesPage(palette, configs, runtime, rootController, rootAvailable, rootMode, onStart, onStop, onEdit, onNewConfig, onImportToml, onDeleteConfig, onDefaultConfig, onExportConfig)
+                    0 -> NetworkPage(palette, configs, runtime, ffiInstances, ffiConfigServer, settings.ffiConfigServerUrl, vpnPermissionRequired, nodesExpanded, onNodesExpandedChange, onStart, onStop, onRequestVpnAuthorization, onSetFfiInstanceEnabled, onEdit, rootController, rootAvailable, rootMode, rootSelectedConfigId, onRootConfigSelected)
+                    1 -> ProfilesPage(palette, configs, ffiInstances, rootController, rootAvailable, rootMode, onStart, onSetFfiInstanceEnabled, onEdit, onNewConfig, onImportToml, onDeleteConfig, onDefaultConfig, onExportConfig)
                     2 -> ServersPage(
                         palette = palette,
                         userServers = userServers,
@@ -718,14 +799,18 @@ private fun MainTabs(
                         rootMode = rootMode,
                         rootAvailable = rootAvailable,
                         settings = settings,
-                        configServer = rootController.state.configServer,
+                        configServer = if (rootMode) rootController.state.configServer else ffiConfigServer,
                         onSettings = onSettings,
                         onConnectConfigServer = onConnectConfigServer,
                         onDisconnectConfigServer = onDisconnectConfigServer,
+                        onSaveFfiConfigServer = onSaveFfiConfigServer,
                         onSaveUserServers = onSaveUserServers,
                         onAddOfficialServer = onAddOfficialServer,
                         onDownloadUsers = onDownloadUsers,
-                        onSyncOfficial = onSyncOfficial
+                        onSyncOfficial = onSyncOfficial,
+                        officialSyncInProgress = officialSyncInProgress,
+                        officialSyncMessage = officialSyncMessage,
+                        officialSyncFailed = officialSyncFailed
                     )
                     else -> SettingsPage(
                         palette = palette,
@@ -750,10 +835,16 @@ private fun NetworkPage(
     palette: Palette,
     configs: List<NetworkConfig>,
     runtime: RuntimeState,
+    ffiInstances: List<FfiInstanceState>,
+    ffiConfigServer: RootConfigServerState,
+    ffiConfigServerUrl: String,
+    vpnPermissionRequired: Boolean,
     nodesExpanded: Boolean,
     onNodesExpandedChange: (Boolean) -> Unit,
     onStart: (NetworkConfig) -> Unit,
     onStop: () -> Unit,
+    onRequestVpnAuthorization: () -> Unit,
+    onSetFfiInstanceEnabled: (String, Boolean) -> Unit,
     onEdit: (NetworkConfig) -> Unit,
     rootController: RootTierController,
     rootAvailable: Boolean,
@@ -780,6 +871,12 @@ private fun NetworkPage(
         configs.firstOrNull { it.isDefault }
     } ?: NetworkConfig.defaultConfig()
 
+    val activeFfi = ffiInstances.firstOrNull { it.instanceId == runtime.runningConfigId }
+    val currentName = if (runtime.running) activeFfi?.displayName ?: current.displayName else current.displayName
+    val defaultNoTunEnabled = !runtime.running && ffiInstances.any {
+        it.instanceId == current.id && it.noTun && it.enabled
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -791,7 +888,7 @@ private fun NetworkPage(
         item {
             Header(
                 title = if (runtime.running) "当前网络" else "默认配置",
-                subtitle = current.displayName,
+                subtitle = currentName,
                 palette = palette
             )
         }
@@ -799,8 +896,8 @@ private fun NetworkPage(
             AnimatedContent(
                 targetState = runtime.running,
                 transitionSpec = {
-                    (fadeIn(tween(180)) + scaleIn(initialScale = 0.94f, animationSpec = tween(200)) + fadeIn(tween(200)))
-                        .togetherWith(fadeOut(tween(140)) + scaleOut(targetScale = 0.94f, animationSpec = tween(140)))
+                    (fadeIn(tween(220)) + scaleIn(initialScale = 0.94f, animationSpec = tween(220)))
+                        .togetherWith(fadeOut(tween(220)) + scaleOut(targetScale = 0.94f, animationSpec = tween(220)))
                 },
                 label = "network-mode"
             ) { running ->
@@ -815,12 +912,28 @@ private fun NetworkPage(
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             QButton(
-                                text = if (runtime.starting) "启动中..." else "启动",
+                                text = when {
+                                    defaultNoTunEnabled -> "停止"
+                                    vpnPermissionRequired -> "授权 VPN"
+                                    runtime.starting -> "启动中..."
+                                    else -> "启动"
+                                },
                                 palette = palette,
                                 modifier = Modifier.weight(1f),
-                                enabled = !runtime.starting,
-                                icon = Icons.Rounded.PlayArrow,
-                                onClick = { onStart(current) }
+                                danger = defaultNoTunEnabled,
+                                enabled = vpnPermissionRequired || defaultNoTunEnabled || !runtime.starting,
+                                icon = when {
+                                    defaultNoTunEnabled -> Icons.Rounded.Stop
+                                    vpnPermissionRequired -> Icons.Rounded.Security
+                                    else -> Icons.Rounded.PlayArrow
+                                },
+                                onClick = {
+                                    when {
+                                        defaultNoTunEnabled -> onSetFfiInstanceEnabled(current.id, false)
+                                        vpnPermissionRequired -> onRequestVpnAuthorization()
+                                        else -> onStart(current)
+                                    }
+                                }
                             )
                             QButton(
                                 text = "编辑",
@@ -834,6 +947,15 @@ private fun NetworkPage(
                     }
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        if (vpnPermissionRequired) {
+                            QButton(
+                                text = "授权 VPN",
+                                palette = palette,
+                                modifier = Modifier.fillMaxWidth(),
+                                icon = Icons.Rounded.Security,
+                                onClick = onRequestVpnAuthorization
+                            )
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             QButton(
                                 text = "编辑配置",
@@ -841,7 +963,7 @@ private fun NetworkPage(
                                 modifier = Modifier.weight(1f),
                                 primary = false,
                                 icon = Icons.Rounded.Edit,
-                                enabled = !runtime.stopping,
+                                enabled = !runtime.stopping && activeFfi?.source != "web",
                                 onClick = { onEdit(current) }
                             )
                             QButton(
@@ -854,8 +976,70 @@ private fun NetworkPage(
                                 onClick = onStop
                             )
                         }
-                        RunningStatus(palette, runtime, nodesExpanded, onNodesExpandedChange, current.displayName)
+                        RunningStatus(palette, runtime, nodesExpanded, onNodesExpandedChange, currentName)
                     }
+                }
+            }
+        }
+        if (
+            ffiConfigServerUrl.isNotBlank() || ffiConfigServer.running ||
+            ffiConfigServer.starting || ffiConfigServer.managedNetworks.isNotEmpty() ||
+            ffiConfigServer.error.isNotBlank()
+        ) {
+            item {
+                QCard(palette) {
+                    Text("配置服务器", color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        when {
+                            ffiConfigServer.connected -> "已连接 · ${ffiConfigServer.managedNetworks.size} 个下发网络"
+                            ffiConfigServer.starting -> "正在启动"
+                            ffiConfigServer.running -> "正在连接"
+                            ffiConfigServer.error.isNotBlank() -> ffiConfigServer.error
+                            ffiConfigServer.managedNetworks.isNotEmpty() -> "已断开 · ${ffiConfigServer.managedNetworks.size} 个缓存网络"
+                            else -> "未连接"
+                        },
+                        color = if (ffiConfigServer.error.isNotBlank()) palette.error else if (ffiConfigServer.connected) palette.success else palette.subText,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        }
+        items(
+            ffiInstances.filter { !it.activeVpn && (it.source == "web" || it.running) },
+            key = { "ffi-${it.instanceId}" }
+        ) { instance ->
+            QCard(palette) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text(instance.displayName.ifBlank { instance.instanceName }, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            when {
+                                instance.error.isNotBlank() -> instance.error
+                                instance.running -> if (instance.localCidr.isNotBlank()) "已连接: ${instance.localCidr}" else "运行中"
+                                instance.enabled -> "等待连接"
+                                else -> "已停用"
+                            },
+                            color = if (instance.error.isNotBlank()) palette.error else palette.subText,
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    QButton(
+                        text = if (instance.enabled) "停用" else "启用",
+                        palette = palette,
+                        modifier = Modifier.width(78.dp),
+                        compact = true,
+                        primary = !instance.enabled,
+                        dangerText = instance.enabled,
+                        onClick = { onSetFfiInstanceEnabled(instance.instanceId, !instance.enabled) }
+                    )
+                }
+                if (instance.running || instance.nodes.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    var expanded by remember(instance.instanceId) { mutableStateOf(false) }
+                    NodeList(palette, instance.nodes, expanded) { expanded = it }
                 }
             }
         }
@@ -1017,7 +1201,7 @@ private fun RootNetworkPage(
                 QCard(palette) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("网页控制台", color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text("配置服务器", color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                             Text(
                                 when {
                                     rootState.configServer.connected -> "已连接 · ${rootState.configServer.managedNetworks.size} 个下发网络"
@@ -1083,122 +1267,19 @@ private fun RootConfigSelect(
     palette: Palette,
     onSelected: (String) -> Unit
 ) {
-    var open by remember { mutableStateOf(false) }
-    val selected = configs.firstOrNull { it.id == selectedId }
-    val arrowRotation by animateFloatAsState(
-        targetValue = if (open) 180f else 0f,
-        animationSpec = tween(180),
-        label = "config-arrow"
+    PopupSelect(
+        value = selectedId,
+        options = configs.map { config ->
+            PopupSelectOption(
+                value = config.id,
+                label = config.displayName,
+                subtitle = config.networkName.ifBlank { "未填写网络名称" },
+                running = config.id in runningIds
+            )
+        },
+        palette = palette,
+        onValue = onSelected
     )
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(palette.surfaceVariant)
-                .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(8.dp))
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) { open = !open }
-                .padding(horizontal = 14.dp),
-            contentAlignment = Alignment.CenterStart
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    selected?.displayName.orEmpty(),
-                    color = palette.text,
-                    fontSize = 14.sp,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (selectedId in runningIds) {
-                    Text("运行中", color = palette.success, fontSize = 12.sp)
-                    Spacer(Modifier.width(8.dp))
-                }
-                Icon(
-                    Icons.Rounded.KeyboardArrowDown,
-                    null,
-                    tint = palette.subText,
-                    modifier = Modifier
-                        .size(22.dp)
-                        .graphicsLayer { rotationZ = arrowRotation }
-                )
-            }
-        }
-        AnimatedVisibility(
-            visible = open,
-            enter = expandVertically(animationSpec = tween(200)) + fadeIn(tween(140)),
-            exit = shrinkVertically(animationSpec = tween(160)) + fadeOut(tween(100))
-        ) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 6.dp)
-                    .heightIn(max = 320.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(palette.surface)
-                    .border(BorderStroke(0.8.dp, palette.border), RoundedCornerShape(8.dp))
-                    .padding(vertical = 6.dp)
-                    .zIndex(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                items(configs, key = { it.id }) { config ->
-                    val checked = config.id == selectedId
-                    val running = config.id in runningIds
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(
-                                if (checked) palette.accent.copy(alpha = 0.10f)
-                                else Color.Transparent
-                            )
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) {
-                                onSelected(config.id)
-                                open = false
-                            }
-                            .padding(horizontal = 12.dp, vertical = 9.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                config.displayName,
-                                color = palette.text,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                config.networkName.ifBlank { "未填写网络名称" },
-                                color = if (running) palette.success else palette.subText,
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        if (running) {
-                            Spacer(Modifier.width(10.dp))
-                            Text("运行中", color = palette.success, fontSize = 12.sp)
-                        }
-                        if (checked) {
-                            Spacer(Modifier.width(10.dp))
-                            Icon(Icons.Rounded.Check, null, tint = palette.accent)
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -1237,7 +1318,11 @@ private fun NodeList(
         }
         ExpandArrow(expanded, palette) { onExpandedChange(!expanded) }
     }
-    AnimatedVisibility(visible = expanded, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
+    AnimatedVisibility(
+        visible = expanded,
+        enter = expandVertically(tween(220)) + fadeIn(tween(220)),
+        exit = shrinkVertically(tween(180)) + fadeOut(tween(180))
+    ) {
         Column {
             if (nodes.isEmpty()) {
                 Text("等待节点信息", color = palette.subText, fontSize = 13.sp, modifier = Modifier.padding(vertical = 6.dp))
@@ -1249,13 +1334,11 @@ private fun NodeList(
                             .padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        StatusDot(if (node.local) palette.success else palette.subText)
-                        Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(node.hostname, color = palette.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text("${node.ip} · ${node.role}", color = palette.subText, fontSize = 12.sp, maxLines = 1)
                         }
-                        if (node.latencyMs >= 0) Text("${node.latencyMs} ms", color = palette.subText, fontSize = 12.sp)
+                        Text(if (node.latencyMs < 0) "待测" else "${node.latencyMs} ms", color = palette.subText, fontSize = 12.sp)
                     }
                 }
             }
@@ -1279,7 +1362,11 @@ private fun LogSection(
         Text("运行日志", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
         ExpandArrow(expanded, palette) { onExpandedChange(!expanded) }
     }
-    AnimatedVisibility(visible = expanded, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
+    AnimatedVisibility(
+        visible = expanded,
+        enter = expandVertically(tween(220)) + fadeIn(tween(220)),
+        exit = shrinkVertically(tween(180)) + fadeOut(tween(180))
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1298,12 +1385,12 @@ private fun LogSection(
 private fun ProfilesPage(
     palette: Palette,
     configs: List<NetworkConfig>,
-    runtime: RuntimeState,
+    ffiInstances: List<FfiInstanceState>,
     rootController: RootTierController,
     rootAvailable: Boolean,
     rootMode: Boolean,
     onStart: (NetworkConfig) -> Unit,
-    onStop: () -> Unit,
+    onSetFfiInstanceEnabled: (String, Boolean) -> Unit,
     onEdit: (NetworkConfig) -> Unit,
     onNew: () -> Unit,
     onImportToml: () -> Unit,
@@ -1337,10 +1424,11 @@ private fun ProfilesPage(
         }
         items(configs, key = { it.id }) { cfg ->
             val rootInstance = if (rootMode) rootState.instances.firstOrNull { it.configId == cfg.id } else null
+            val ffiInstance = if (!rootMode) ffiInstances.firstOrNull { it.instanceId == cfg.id } else null
             val runningHere = if (rootMode) {
                 rootInstance?.running == true || rootInstance?.starting == true || rootInstance?.stopping == true
             } else {
-                runtime.running && runtime.runningConfigId == cfg.id
+                ffiInstance?.enabled == true
             }
             val runnable = if (rootMode) rootAvailable else true
             AnimatedVisibility(
@@ -1372,7 +1460,7 @@ private fun ProfilesPage(
                         icon = if (runningHere) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
                         onClick = {
                             if (runningHere) {
-                                if (rootMode) rootController.stop(cfg.id) else onStop()
+                                if (rootMode) rootController.stop(cfg.id) else onSetFfiInstanceEnabled(cfg.id, false)
                             } else {
                                 if (rootMode) rootController.start(cfg) else onStart(cfg)
                             }
@@ -1431,16 +1519,25 @@ private fun ServersPage(
     onSettings: (AppSettings) -> Unit,
     onConnectConfigServer: () -> Unit,
     onDisconnectConfigServer: () -> Unit,
+    onSaveFfiConfigServer: (String) -> Unit,
     onSaveUserServers: (List<ServerEntry>) -> Unit,
     onAddOfficialServer: (ServerEntry) -> Unit,
     onDownloadUsers: (String) -> Unit,
-    onSyncOfficial: () -> Unit
+    onSyncOfficial: () -> Unit,
+    officialSyncInProgress: Boolean,
+    officialSyncMessage: String?,
+    officialSyncFailed: Boolean
 ) {
     var favoriteOpen by remember { mutableStateOf(false) }
     var officialOpen by remember { mutableStateOf(false) }
     var consoleOpen by remember { mutableStateOf(false) }
     var consoleLogsOpen by remember { mutableStateOf(false) }
+    var ffiDraft by remember { mutableStateOf(settings.ffiConfigServerUrl) }
     var source by remember { mutableStateOf("") }
+
+    LaunchedEffect(settings.ffiConfigServerUrl) {
+        ffiDraft = settings.ffiConfigServerUrl
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -1453,15 +1550,14 @@ private fun ServersPage(
         item {
             Header(
                 "服务器",
-                if (rootMode) "网页控制台、用户收藏与官方源" else "用户收藏和官方源分开管理",
+                "配置服务器、用户收藏与官方源",
                 palette
             )
         }
-        if (rootMode) {
-            item {
+        item {
                 QCard(palette) {
                     val statusText = when {
-                        !rootAvailable -> "Root 不可用"
+                        rootMode && !rootAvailable -> "Root 不可用"
                         configServer.stopping -> "正在断开"
                         configServer.starting -> "正在启动"
                         configServer.connected -> "已连接"
@@ -1471,7 +1567,7 @@ private fun ServersPage(
                     }
                     val statusColor = when {
                         configServer.connected -> palette.success
-                        configServer.error.isNotBlank() || !rootAvailable -> palette.error
+                        configServer.error.isNotBlank() || (rootMode && !rootAvailable) -> palette.error
                         else -> palette.subText
                     }
                     Row(
@@ -1481,7 +1577,7 @@ private fun ServersPage(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("网页控制台", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                            Text("配置服务器", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                             Text(
                                 if (configServer.managedNetworks.isEmpty()) statusText else "$statusText · ${configServer.managedNetworks.size} 个下发网络",
                                 color = statusColor,
@@ -1494,39 +1590,61 @@ private fun ServersPage(
                     }
                     AnimatedVisibility(
                         visible = consoleOpen,
-                        enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(160)),
-                        exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(120))
+                        enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(220)),
+                        exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(180))
                     ) {
                         Column(Modifier.padding(top = 10.dp)) {
-                            FieldBlock("完整配置服务器 URL", palette) {
-                                QTextField(
-                                    value = settings.configServerUrl,
-                                    placeholder = "udp://host:22020/admin",
+                            if (rootMode) {
+                                FieldBlock("完整配置服务器 URL", palette) {
+                                    QTextField(
+                                        value = settings.configServerUrl,
+                                        placeholder = "udp://host:22020/admin",
+                                        palette = palette,
+                                        onValueChange = { onSettings(settings.copy(configServerUrl = it)) }
+                                    )
+                                }
+                                FieldBlock("主机名", palette) {
+                                    QTextField(
+                                        value = settings.configServerHostname,
+                                        placeholder = "留空时使用设备名",
+                                        palette = palette,
+                                        onValueChange = { onSettings(settings.copy(configServerHostname = it)) }
+                                    )
+                                }
+                                FieldBlock("机器 ID", palette) {
+                                    QTextField(
+                                        value = settings.configServerMachineId,
+                                        placeholder = "留空时使用 Android 设备 ID",
+                                        palette = palette,
+                                        onValueChange = { onSettings(settings.copy(configServerMachineId = it)) }
+                                    )
+                                }
+                                SwitchRow("配置服务器加密（Secure Mode）", settings.configServerSecureMode, palette) {
+                                    onSettings(settings.copy(configServerSecureMode = it))
+                                }
+                                SwitchRow("启动时自动连接", settings.configServerAutoConnect, palette) {
+                                    onSettings(settings.copy(configServerAutoConnect = it))
+                                }
+                            } else {
+                                FieldBlock("配置服务器地址", palette) {
+                                    QTextField(
+                                        value = ffiDraft,
+                                        placeholder = "用户名或 udp://host:22020/username",
+                                        palette = palette,
+                                        onValueChange = { ffiDraft = it }
+                                    )
+                                }
+                                Spacer(Modifier.height(10.dp))
+                                QButton(
+                                    text = "保存",
                                     palette = palette,
-                                    onValueChange = { onSettings(settings.copy(configServerUrl = it)) }
+                                    modifier = Modifier.fillMaxWidth(),
+                                    icon = Icons.Rounded.Check,
+                                    enabled = !configServer.starting && !configServer.stopping &&
+                                        (ffiDraft.trim() != configServer.serverUrl.trim() ||
+                                            (ffiDraft.isNotBlank() && !configServer.running)),
+                                    onClick = { onSaveFfiConfigServer(ffiDraft.trim()) }
                                 )
-                            }
-                            FieldBlock("主机名", palette) {
-                                QTextField(
-                                    value = settings.configServerHostname,
-                                    placeholder = "留空时使用设备名",
-                                    palette = palette,
-                                    onValueChange = { onSettings(settings.copy(configServerHostname = it)) }
-                                )
-                            }
-                            FieldBlock("机器 ID", palette) {
-                                QTextField(
-                                    value = settings.configServerMachineId,
-                                    placeholder = "留空时使用 Android 设备 ID",
-                                    palette = palette,
-                                    onValueChange = { onSettings(settings.copy(configServerMachineId = it)) }
-                                )
-                            }
-                            SwitchRow("配置服务器加密（Secure Mode）", settings.configServerSecureMode, palette) {
-                                onSettings(settings.copy(configServerSecureMode = it))
-                            }
-                            SwitchRow("启动时自动连接", settings.configServerAutoConnect, palette) {
-                                onSettings(settings.copy(configServerAutoConnect = it))
                             }
                             if (configServer.error.isNotBlank()) {
                                 Text(configServer.error, color = palette.error, fontSize = 12.sp, lineHeight = 18.sp)
@@ -1540,7 +1658,7 @@ private fun ServersPage(
                                             .padding(vertical = 5.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        StatusDot(palette.success)
+                                        StatusDot(if (network.running) palette.success else palette.subText)
                                         Spacer(Modifier.width(10.dp))
                                         Column(Modifier.weight(1f)) {
                                             Text(
@@ -1550,29 +1668,40 @@ private fun ServersPage(
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
-                                            Text(network.localCidr.ifBlank { "等待虚拟 IP" }, color = palette.subText, fontSize = 12.sp)
+                                            Text(
+                                                when {
+                                                    network.error.isNotBlank() -> network.error
+                                                    !network.running -> "已停用"
+                                                    network.noTun -> "无 TUN · 运行中"
+                                                    else -> network.localCidr.ifBlank { "等待虚拟 IP" }
+                                                },
+                                                color = if (network.error.isNotBlank()) palette.error else palette.subText,
+                                                fontSize = 12.sp
+                                            )
                                         }
                                     }
                                 }
                             }
-                            Spacer(Modifier.height(10.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                QButton(
-                                    text = if (configServer.starting) "启动中" else "连接",
-                                    palette = palette,
-                                    modifier = Modifier.weight(1f),
-                                    enabled = rootAvailable && !configServer.running && !configServer.starting && !configServer.stopping && isFullConfigServerUrl(settings.configServerUrl),
-                                    onClick = onConnectConfigServer
-                                )
-                                QButton(
-                                    text = if (configServer.stopping) "断开中" else "断开",
-                                    palette = palette,
-                                    modifier = Modifier.weight(1f),
-                                    primary = false,
-                                    dangerText = true,
-                                    enabled = configServer.running || configServer.starting,
-                                    onClick = onDisconnectConfigServer
-                                )
+                            if (rootMode) {
+                                Spacer(Modifier.height(10.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    QButton(
+                                        text = if (configServer.starting) "启动中" else "连接",
+                                        palette = palette,
+                                        modifier = Modifier.weight(1f),
+                                        enabled = rootAvailable && !configServer.running && !configServer.starting && !configServer.stopping && isFullConfigServerUrl(settings.configServerUrl),
+                                        onClick = onConnectConfigServer
+                                    )
+                                    QButton(
+                                        text = if (configServer.stopping) "断开中" else "断开",
+                                        palette = palette,
+                                        modifier = Modifier.weight(1f),
+                                        primary = false,
+                                        dangerText = true,
+                                        enabled = configServer.running || configServer.starting,
+                                        onClick = onDisconnectConfigServer
+                                    )
+                                }
                             }
                             if (configServer.logs.isNotEmpty()) {
                                 Spacer(Modifier.height(8.dp))
@@ -1587,7 +1716,6 @@ private fun ServersPage(
                     }
                 }
             }
-        }
         item {
             QCard(palette) {
                 Row(
@@ -1604,8 +1732,8 @@ private fun ServersPage(
                 }
                 AnimatedVisibility(
                     visible = favoriteOpen,
-                    enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(160)),
-                    exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(120))
+                    enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(220)),
+                    exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(180))
                 ) {
                     Column(Modifier.padding(top = 12.dp)) {
                         ListEditor(
@@ -1641,18 +1769,28 @@ private fun ServersPage(
                 }
                 AnimatedVisibility(
                     visible = officialOpen,
-                    enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(160)),
-                    exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(120))
+                    enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(220)),
+                    exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(180))
                 ) {
                     Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         QButton(
-                            "立即同步公共服务器",
+                            if (officialSyncInProgress) "同步中" else "立即同步公共服务器",
                             palette,
                             Modifier.fillMaxWidth(),
                             primary = false,
-                            icon = Icons.Rounded.Storage,
+                            icon = Icons.Rounded.Refresh,
+                            iconRotation = spinOnceRotation(officialSyncInProgress),
+                            enabled = !officialSyncInProgress,
                             onClick = onSyncOfficial
                         )
+                        officialSyncMessage?.let { message ->
+                            Text(
+                                message,
+                                color = if (officialSyncFailed) palette.error else palette.success,
+                                fontSize = 12.sp,
+                                lineHeight = 18.sp
+                            )
+                        }
                         officialServers.ifEmpty { listOf(ServerEntry("暂无官方服务器", "")) }.forEach { server ->
                             Row(
                                 modifier = Modifier
@@ -1762,7 +1900,7 @@ private fun SettingsPage(
                             compact = true,
                             primary = false,
                             icon = Icons.Rounded.Refresh,
-                            iconRotation = SpinOnceRotation(rootChecking),
+                            iconRotation = spinOnceRotation(rootChecking),
                             enabled = !rootChecking,
                             onClick = onRefreshRoot
                         )
@@ -1809,8 +1947,8 @@ private fun SettingsPage(
                 }
                 AnimatedVisibility(
                     visible = logExpanded,
-                    enter = expandVertically(tween(220)) + fadeIn(tween(180)),
-                    exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                    enter = expandVertically(tween(220)) + fadeIn(tween(220)),
+                    exit = shrinkVertically(tween(180)) + fadeOut(tween(180))
                 ) {
                     Column {
                         Spacer(Modifier.height(12.dp))
@@ -1835,7 +1973,7 @@ private fun SettingsPage(
                                 primary = false,
                                 enabled = !appLogRefreshing,
                                 icon = Icons.Rounded.Refresh,
-                                iconRotation = SpinOnceRotation(appLogRefreshing),
+                                iconRotation = spinOnceRotation(appLogRefreshing),
                                 onClick = {
                                     scope.launch {
                                         appLogRefreshing = true
@@ -1912,7 +2050,7 @@ private fun SettingsPage(
                         primary = false,
                         enabled = !core.checking && !core.installing,
                         icon = Icons.Rounded.Refresh,
-                        iconRotation = SpinOnceRotation(core.checking),
+                        iconRotation = spinOnceRotation(core.checking),
                         onClick = { rootController.checkCoreUpdate() }
                     )
                     QButton(
@@ -2031,7 +2169,7 @@ private fun ModeButton(
 }
 
 @Composable
-private fun SpinOnceRotation(active: Boolean): Float {
+private fun spinOnceRotation(active: Boolean): Float {
     var turns by remember { mutableIntStateOf(0) }
     LaunchedEffect(active) {
         if (active) turns += 1
@@ -2248,7 +2386,11 @@ private fun ConfigEditorScreenV2(
                 SwitchRow("系统转发", cfg.proxyForwardBySystem, palette) { cfg = cfg.copy(proxyForwardBySystem = it) }
                 SwitchRow("启用魔法 DNS", cfg.enableMagicDns, palette) { cfg = cfg.copy(enableMagicDns = it) }
                 SwitchRow("启用网络白名单", cfg.enableRelayNetworkWhitelist, palette) { cfg = cfg.copy(enableRelayNetworkWhitelist = it) }
-                AnimatedVisibility(cfg.enableRelayNetworkWhitelist, enter = fadeIn(tween(160)), exit = fadeOut(tween(120))) {
+                AnimatedVisibility(
+                    cfg.enableRelayNetworkWhitelist,
+                    enter = expandVertically(tween(220)) + fadeIn(tween(220)),
+                    exit = shrinkVertically(tween(180)) + fadeOut(tween(180))
+                ) {
                     Column(Modifier.padding(top = 8.dp)) {
                         ListEditor("网络白名单", cfg.relayNetworkWhitelist, "网络名称", palette) {
                             cfg = cfg.copy(relayNetworkWhitelist = it)
@@ -2370,8 +2512,8 @@ private fun ExpandableQCard(
         }
         AnimatedVisibility(
             visible = expanded,
-            enter = expandVertically(animationSpec = tween(240)) + fadeIn(tween(170)),
-            exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(120))
+            enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(220)),
+            exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(180))
         ) {
             Column(
                 modifier = Modifier
@@ -2463,28 +2605,104 @@ private fun QSelect(
     palette: Palette,
     onValue: (String) -> Unit
 ) {
+    PopupSelect(
+        value = value.ifBlank { options.firstOrNull().orEmpty() },
+        options = options.map { PopupSelectOption(value = it, label = it) },
+        palette = palette,
+        height = 44.dp,
+        onValue = onValue
+    )
+}
+
+private data class PopupSelectOption(
+    val value: String,
+    val label: String,
+    val subtitle: String = "",
+    val running: Boolean = false
+)
+
+@Composable
+private fun PopupSelect(
+    value: String,
+    options: List<PopupSelectOption>,
+    palette: Palette,
+    height: Dp = 46.dp,
+    onValue: (String) -> Unit
+) {
     var open by remember { mutableStateOf(false) }
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(44.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(palette.surfaceVariant)
-            .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(14.dp))
-            .clickable { open = true }
-            .padding(horizontal = 16.dp),
-        contentAlignment = Alignment.CenterStart
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(value.ifBlank { options.firstOrNull().orEmpty() }, color = palette.text, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            Icon(Icons.Rounded.KeyboardArrowDown, null, tint = palette.subText)
+    val selected = options.firstOrNull { it.value == value } ?: options.firstOrNull()
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (open) 180f else 0f,
+        animationSpec = tween(180),
+        label = "select-arrow"
+    )
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(height)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surfaceVariant)
+                .border(BorderStroke(0.7.dp, palette.border), RoundedCornerShape(8.dp))
+                .clickable { open = !open }
+                .padding(horizontal = 14.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    selected?.label ?: "暂无配置",
+                    color = palette.text,
+                    fontSize = 14.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (selected?.running == true) {
+                    Text("运行中", color = palette.success, fontSize = 12.sp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Icon(
+                    Icons.Rounded.KeyboardArrowDown,
+                    null,
+                    tint = palette.subText,
+                    modifier = Modifier.size(22.dp).graphicsLayer { rotationZ = arrowRotation }
+                )
+            }
         }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            modifier = Modifier.width(maxWidth).heightIn(max = 320.dp)
+        ) {
             options.forEach { option ->
+                val checked = option.value == value
                 DropdownMenuItem(
-                    text = { Text(option) },
+                    modifier = Modifier.background(if (checked) palette.accent.copy(alpha = 0.10f) else Color.Transparent),
+                    text = {
+                        Column {
+                            Text(option.label, color = palette.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (option.subtitle.isNotBlank()) {
+                                Text(
+                                    option.subtitle,
+                                    color = if (option.running) palette.success else palette.subText,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            }
+                    },
+                    trailingIcon = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (option.running) Text("运行中", color = palette.success, fontSize = 12.sp)
+                            if (checked) {
+                                Spacer(Modifier.width(8.dp))
+                                Icon(Icons.Rounded.Check, null, tint = palette.accent)
+                            }
+                        }
+                    },
                     onClick = {
-                        onValue(option)
+                        onValue(option.value)
                         open = false
                     }
                 )

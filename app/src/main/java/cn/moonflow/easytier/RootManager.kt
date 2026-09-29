@@ -1,5 +1,7 @@
 package cn.moonflow.easytier
 
+import android.os.Build
+import android.os.SystemClock
 import java.util.concurrent.TimeUnit
 
 data class ShellResult(
@@ -85,15 +87,33 @@ object RootManager {
                 isDaemon = true
                 start()
             }
-            val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            val finished = waitForProcess(process, timeoutMs)
             if (!finished) {
-                process.destroyForcibly()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) process.destroyForcibly()
+                else process.destroy()
                 return ShellResult(-1, "命令执行超时", timedOut = true)
             }
             reader.join(1000)
             ShellResult(process.exitValue(), synchronized(output) { output.toString().trim() })
         } catch (e: Exception) {
             ShellResult(-1, e.message ?: "无法执行 root 命令")
+        }
+    }
+
+    private fun waitForProcess(process: Process, timeoutMs: Long): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+        }
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (true) {
+            try {
+                process.exitValue()
+                return true
+            } catch (_: IllegalThreadStateException) {
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0) return false
+                Thread.sleep(minOf(remaining, 25L))
+            }
         }
     }
 }

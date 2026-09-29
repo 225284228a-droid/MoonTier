@@ -198,21 +198,16 @@ async fn main() -> Result<()> {
                     let routes = info
                         .routes
                         .into_iter()
-                        .map(|route| {
-                            let ipv4_addr = route.ipv4_addr.map(|ipv4| {
-                                json!({
-                                    "address": ipv4.address.map(|address| json!({ "addr": address.addr })),
-                                    "network_length": ipv4.network_length,
-                                })
-                            });
+                        .map(route_json)
+                        .collect::<Vec<_>>();
+                    let peers = info.peers.into_iter().map(peer_json).collect::<Vec<_>>();
+                    let peer_route_pairs = info
+                        .peer_route_pairs
+                        .into_iter()
+                        .map(|pair| {
                             json!({
-                                "hostname": route.hostname,
-                                "ipv4_addr": ipv4_addr,
-                                "cost": route.cost,
-                                "path_latency": route.path_latency,
-                                "feature_flag": {
-                                    "is_public_server": route.feature_flag.map(|flags| flags.is_public_server).unwrap_or(false),
-                                },
+                                "route": pair.route.map(route_json),
+                                "peer": pair.peer.map(peer_json),
                             })
                         })
                         .collect::<Vec<_>>();
@@ -221,6 +216,8 @@ async fn main() -> Result<()> {
                         json!({
                             "my_node_info": my_node_info,
                             "routes": routes,
+                            "peers": peers,
+                            "peer_route_pairs": peer_route_pairs,
                             "events": info.events.into_iter().take(40).map(summarize_event).collect::<Vec<_>>(),
                             "running": info.running,
                             "error_msg": info.error_msg,
@@ -240,6 +237,38 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn route_json(route: easytier::proto::api::instance::Route) -> serde_json::Value {
+    let ipv4_addr = route.ipv4_addr.map(|ipv4| {
+        json!({
+            "address": ipv4.address.map(|address| json!({ "addr": address.addr })),
+            "network_length": ipv4.network_length,
+        })
+    });
+    json!({
+        "peer_id": route.peer_id,
+        "hostname": route.hostname,
+        "ipv4_addr": ipv4_addr,
+        "cost": route.cost,
+        "feature_flag": {
+            "is_public_server": route.feature_flag.map(|flags| flags.is_public_server).unwrap_or(false),
+        },
+    })
+}
+
+fn peer_json(peer: easytier::proto::api::instance::PeerInfo) -> serde_json::Value {
+    json!({
+        "peer_id": peer.peer_id,
+        "default_conn_id": peer.default_conn_id.map(uuid::Uuid::from).map(|id| id.to_string()),
+        "conns": peer.conns.into_iter().map(|conn| {
+            json!({
+                "conn_id": conn.conn_id,
+                "is_closed": conn.is_closed,
+                "stats": conn.stats.map(|stats| json!({ "latency_us": stats.latency_us })),
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn summarize_event(raw: String) -> String {

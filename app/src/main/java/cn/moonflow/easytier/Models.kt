@@ -233,7 +233,8 @@ data class AppSettings(
     val configServerHostname: String = "",
     val configServerMachineId: String = "",
     val configServerSecureMode: Boolean = true,
-    val configServerAutoConnect: Boolean = false
+    val configServerAutoConnect: Boolean = false,
+    val ffiConfigServerUrl: String = ""
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("auto_sync_official_servers", autoSyncOfficialServers)
@@ -247,6 +248,7 @@ data class AppSettings(
         .put("config_server_machine_id", configServerMachineId)
         .put("config_server_secure_mode", configServerSecureMode)
         .put("config_server_auto_connect", configServerAutoConnect)
+        .put("ffi_config_server_url", ffiConfigServerUrl)
 
     companion object {
         fun fromJson(obj: JSONObject): AppSettings = AppSettings(
@@ -260,7 +262,8 @@ data class AppSettings(
             configServerHostname = obj.optString("config_server_hostname", ""),
             configServerMachineId = obj.optString("config_server_machine_id", ""),
             configServerSecureMode = obj.optBoolean("config_server_secure_mode", true),
-            configServerAutoConnect = obj.optBoolean("config_server_auto_connect", false)
+            configServerAutoConnect = obj.optBoolean("config_server_auto_connect", false),
+            ffiConfigServerUrl = (obj.opt("ffi_config_server_url") as? String).orEmpty()
         )
     }
 }
@@ -312,7 +315,24 @@ data class RootManagedNetworkState(
     val instanceId: String = "",
     val instanceName: String = "",
     val localCidr: String = "",
-    val nodes: List<NodeInfo> = emptyList()
+    val nodes: List<NodeInfo> = emptyList(),
+    val running: Boolean = true,
+    val noTun: Boolean = false,
+    val error: String = ""
+)
+
+data class FfiInstanceState(
+    val instanceId: String,
+    val instanceName: String,
+    val displayName: String,
+    val source: String,
+    val noTun: Boolean,
+    val enabled: Boolean,
+    val running: Boolean,
+    val activeVpn: Boolean = false,
+    val localCidr: String = "",
+    val nodes: List<NodeInfo> = emptyList(),
+    val error: String = ""
 )
 
 data class RootConfigServerState(

@@ -67,6 +67,13 @@ class ConfigStore(private val context: Context) {
     fun deleteConfig(id: String) {
         val filtered = loadConfigs().filterNot { it.id == id }
         saveConfigs(filtered)
+        val runtime = JSONArray(loadFfiRuntime())
+        val remaining = JSONArray()
+        for (index in 0 until runtime.length()) {
+            val item = runtime.optJSONObject(index) ?: continue
+            if (item.stringValue("instance_id") != id) remaining.put(item)
+        }
+        if (remaining.length() != runtime.length()) saveFfiRuntime(remaining.toString())
     }
 
     @Synchronized
@@ -110,9 +117,32 @@ class ConfigStore(private val context: Context) {
             configServerHostname = settings.configServerHostname,
             configServerMachineId = settings.configServerMachineId,
             configServerSecureMode = settings.configServerSecureMode,
-            configServerAutoConnect = settings.configServerAutoConnect
+            configServerAutoConnect = settings.configServerAutoConnect,
+            ffiConfigServerUrl = settings.ffiConfigServerUrl
         )
         writeTextAtomic(settingsFile, merged.toJson().toString(2))
+    }
+
+    @Synchronized
+    fun saveFfiConfigServerUrl(url: String) {
+        writeTextAtomic(settingsFile, loadSettings().copy(ffiConfigServerUrl = url.trim()).toJson().toString(2))
+    }
+
+    @Synchronized
+    fun loadFfiRuntime(): String =
+        readJsonArray(File(context.filesDir, "ffi_runtime.json"))?.toString() ?: "[]"
+
+    @Synchronized
+    fun saveFfiRuntime(snapshot: String) {
+        val array = JSONArray(snapshot)
+        writeTextAtomic(File(context.filesDir, "ffi_runtime.json"), array.toString())
+    }
+
+    @Synchronized
+    fun ffiMachineId(): String {
+        val file = File(context.filesDir, "ffi_machine_id")
+        return runCatching { readTextAtomic(file).trim() }.getOrDefault("")
+            .ifBlank { UUID.randomUUID().toString().also { writeTextAtomic(file, it) } }
     }
 
     @Synchronized

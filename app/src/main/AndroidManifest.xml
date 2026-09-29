@@ -26,6 +26,15 @@
         </activity>
 
         <service
+            android:name=".EasyTierRuntimeService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="user_started_overlay_network_and_remote_configuration_client" />
+        </service>
+
+        <service
             android:name=".EasyTierVpnService"
             android:enabled="true"
             android:exported="false"

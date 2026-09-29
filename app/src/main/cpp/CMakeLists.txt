@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.22.1)
 project(moontier_native_bridge LANGUAGES CXX)
 
 add_library(moontier_native_bridge SHARED native_bridge.cpp)
+target_link_options(moontier_native_bridge PRIVATE "-Wl,-z,max-page-size=16384")
 
 find_library(log-lib log)
 find_library(dl-lib dl)
