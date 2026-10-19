@@ -99,6 +99,14 @@ replacing a live Root core, and full visual/theme acceptance were not exercised.
   Six new cases cover advanced configuration/storage round trips, older-profile
   defaults, static-address import, extension preservation, string quoting and
   unsigned integer bounds.
-- ADB listed no devices during this update, including after `adb reconnect`.
-  This revision was built but could not be installed or visually checked on the
-  phone. The earlier device findings above apply to the previous revision.
+- ADB was initially unavailable, then reconnected. Installed revision `a09d230`
+  in place on the same Xiaomi 23113RKC6C without uninstalling or clearing data.
+- Checked the “运行状态” label, profile selector, three core-source choices,
+  source-menu selection/dismissal, and the light/dark menu appearance on-device.
+- In an unsaved new profile, IPv6 DHCP revealed the CIDR field and secure mode
+  revealed node keys and managed credentials. Both the default profile and the
+  profile with IPv6 DHCP/secure mode enabled passed the bundled native parser
+  and opened Android's export picker; both exports were canceled.
+- Discarded the new profile and restored the original light theme. Existing
+  profiles, Root mode, source selection and installed core were preserved.
+  No network instance was started in this focused UI/config-parser pass.
