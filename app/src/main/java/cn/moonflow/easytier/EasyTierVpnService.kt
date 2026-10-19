@@ -99,7 +99,7 @@ class EasyTierVpnService : VpnService() {
         val addresses = config.getJSONArray("addresses")
         val routes = config.optJSONArray("routes")
         val dns = config.stringValue("dns")
-        val builder = Builder().setSession("MoonTier · 多配置")
+        val builder = Builder().setSession("MoonTier")
             .setMtu(config.optInt("mtu", 1400)).setBlocking(false)
         require(addresses.length() > 0) { "共享 VPN 没有可用地址" }
         for (index in 0 until addresses.length()) {

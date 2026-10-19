@@ -55,6 +55,7 @@ data class NetworkConfig(
     val defaultProtocol: String = "tcp",
     val encryptionAlgorithm: String = "aes-gcm",
     val aclToml: String = "",
+    val advanced: AdvancedNetworkConfig = AdvancedNetworkConfig(),
     val isDefault: Boolean = true,
     val isRunning: Boolean = false
 ) {
@@ -112,6 +113,7 @@ data class NetworkConfig(
         .put("default_protocol", defaultProtocol)
         .put("encryption_algorithm", encryptionAlgorithm)
         .put("acl_toml", aclToml)
+        .put("advanced", advanced.toJson())
         .put("is_default", isDefault)
         .put("is_running", isRunning)
 
@@ -184,6 +186,7 @@ data class NetworkConfig(
             defaultProtocol = obj.optString("default_protocol", "tcp"),
             encryptionAlgorithm = obj.optString("encryption_algorithm", "aes-gcm"),
             aclToml = obj.optString("acl_toml", ""),
+            advanced = AdvancedNetworkConfig.fromJson(obj.optJSONObject("advanced") ?: JSONObject()),
             isDefault = obj.optBoolean("is_default", false),
             isRunning = obj.optBoolean("is_running", false)
         )

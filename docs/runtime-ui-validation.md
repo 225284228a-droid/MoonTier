@@ -72,3 +72,33 @@ local signing configuration and upgraded in place without uninstalling the app.
 Live remote configuration-server mutations, peer-to-peer data transfer, subnet
 conflicts, IPv6/shared-DNS traffic, permission revocation races, downloading and
 replacing a live Root core, and full visual/theme acceptance were not exercised.
+
+
+## Configuration form and selector update (2026-10-20)
+
+- Audited the pinned upstream `common.Flags` schema: all 42 non-deprecated
+  flags have controls in the configuration form. New controls cover compression,
+  worker count, receive/foreign relay limits, socket mark, device name, DNS zone,
+  broadcast forwarding, data relay policy and preferred peer relay.
+- Added IPv4/IPv6 DHCP CIDRs, static IPv6, public IPv6 allocation/provider,
+  secure mode and node/peer keys, managed credentials, TCP/UDP allowlists,
+  TCP/IPv6 STUN, mapped listeners, SOCKS5, proxy subnet mapping/group access,
+  port forwards, and WireGuard portal/client configuration.
+- Advanced values persist in the profile JSON and round-trip through TOML.
+  Unknown root keys, flags and extra sections remain available through raw TOML;
+  ACL remains in its existing TOML editor. Host filesystem/namespace and source
+  metadata settings remain raw TOML rather than Android form controls.
+- Save/export now apply pending raw TOML edits and ask the bundled core to parse
+  the result before accepting it. Unsigned numeric inputs are checked locally;
+  uint64 values above TOML's signed integer range use protobuf string encoding.
+  Compression values use the core's canonical enum names (`None`, `Zstd`).
+- Renamed the first tab/header to “运行状态”, removed the redundant concurrent
+  profile descriptions, and styled the shared selector container, rows,
+  selected state, border and shape with the app's light/dark palette.
+- `testDebugUnitTest assembleDebug --offline` passed: 25 JVM tests, zero failures.
+  Six new cases cover advanced configuration/storage round trips, older-profile
+  defaults, static-address import, extension preservation, string quoting and
+  unsigned integer bounds.
+- ADB listed no devices during this update, including after `adb reconnect`.
+  This revision was built but could not be installed or visually checked on the
+  phone. The earlier device findings above apply to the previous revision.
