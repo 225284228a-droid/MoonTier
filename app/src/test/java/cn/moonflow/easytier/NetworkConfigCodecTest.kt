@@ -84,7 +84,7 @@ class NetworkConfigCodecTest {
         assertEquals(config, NetworkConfig.fromJson(JSONObject(config.toJson().toString())))
         val toml = TomlCodec.build(config)
         assertTrue(toml.contains("instance_recv_bps_limit = \"18446744073709551615\""))
-        assertTrue(toml.contains("data_compress_algo = \"Zstd\""))
+        assertTrue(toml.contains("data_compress_algo = 2"))
         assertEquals(config, TomlCodec.parse(toml))
     }
 
@@ -105,7 +105,26 @@ class NetworkConfigCodecTest {
         assertEquals("none", config.advanced.dataCompressAlgo)
         val toml = TomlCodec.build(config)
         assertFalse(toml.contains("[secure_mode]"))
-        assertTrue(toml.contains("data_compress_algo = \"None\""))
+        assertFalse(toml.contains("data_compress_algo"))
+    }
+
+    @Test fun defaultOptionsAreNotWrittenToConfig() {
+        val toml = TomlCodec.build(NetworkConfig())
+        assertFalse(toml.contains("latency_first"))
+        assertFalse(toml.contains("enable_encryption"))
+        assertFalse(toml.contains("enable_ipv6"))
+        assertFalse(toml.contains("multi_thread"))
+        assertFalse(toml.contains("bind_device"))
+        assertFalse(toml.contains("encryption_algorithm"))
+        assertFalse(toml.contains("ipv6_public_addr_provider"))
+        assertFalse(toml.contains("data_compress_algo"))
+        assertFalse(toml.contains("accept_dns"))
+        assertFalse(toml.contains("[secure_mode]"))
+        assertTrue(toml.contains("dhcp = true"))
+        assertTrue(toml.contains("private_mode = true"))
+        // Round-tripping a short default config must keep the same effective values.
+        val restored = TomlCodec.parse(toml)
+        assertEquals(NetworkConfig().copy(id = restored.id, isDefault = false), restored)
     }
 
     @Test fun extensionSectionsAndUnknownFlagsAreRetainedWhenEditing() {

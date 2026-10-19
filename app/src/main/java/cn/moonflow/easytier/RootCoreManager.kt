@@ -18,6 +18,7 @@ class RootCoreManager(private val context: Context) {
     val managerClientFile = File(coreDir, "moontier-root-manager")
     private val versionFile = File(coreDir, "version.txt")
     private val managerClientVersionFile = File(coreDir, "manager-client.version")
+    private val previousVersionFile = File(coreDir, "previous-version.txt")
 
     fun ensureDirectories() {
         coreDir.mkdirs()
@@ -28,6 +29,42 @@ class RootCoreManager(private val context: Context) {
 
     fun installedVersion(): String =
         runCatching { versionFile.readText().trim() }.getOrDefault("")
+
+    fun hasRollback(): Boolean =
+        File(coreDir, "${coreFile.name}.previous").isFile &&
+            File(coreDir, "${cliFile.name}.previous").isFile &&
+            previousVersionFile.isFile
+
+    /** Restores the core that was replaced by the last install. */
+    fun rollback(): String {
+        val previousCore = File(coreDir, "${coreFile.name}.previous")
+        val previousCli = File(coreDir, "${cliFile.name}.previous")
+        check(previousCore.isFile && previousCli.isFile) { "没有可回退的上一版本核心" }
+        val failedCore = File(coreDir, "${coreFile.name}.failed")
+        val failedCli = File(coreDir, "${cliFile.name}.failed")
+        failedCore.delete()
+        failedCli.delete()
+        try {
+            if (coreFile.exists() && !coreFile.renameTo(failedCore)) throw IllegalStateException("无法暂存当前核心")
+            if (cliFile.exists() && !cliFile.renameTo(failedCli)) throw IllegalStateException("无法暂存当前 CLI")
+            if (!previousCore.renameTo(coreFile)) throw IllegalStateException("无法恢复上一版本核心")
+            if (!previousCli.renameTo(cliFile)) throw IllegalStateException("无法恢复上一版本 CLI")
+            val restored = runCatching { previousVersionFile.readText().trim() }.getOrDefault("")
+                .ifBlank { "上一版本" }
+            versionFile.writeText(restored)
+            previousVersionFile.delete()
+            coreFile.setExecutable(true, false)
+            cliFile.setExecutable(true, false)
+            failedCore.delete()
+            failedCli.delete()
+            return restored
+        } catch (error: Exception) {
+            // Put the working pair back if a later step failed.
+            if (!coreFile.exists() && failedCore.isFile) failedCore.renameTo(coreFile)
+            if (!cliFile.exists() && failedCli.isFile) failedCli.renameTo(cliFile)
+            throw error
+        }
+    }
 
     private fun fetchRelease(channel: CoreReleaseChannel): CoreRelease {
         val connection = URL("https://api.github.com/repos/EasyTier/EasyTier/${channel.endpoint}")
@@ -74,7 +111,8 @@ class RootCoreManager(private val context: Context) {
         }
 
     private fun installRelease(zip: File, version: String) {
-        extractRelease(zip)
+        val previousVersion = installedVersion()
+        extractRelease(zip, previousVersion)
         versionFile.writeText(version)
         coreFile.setExecutable(true, false)
         cliFile.setExecutable(true, false)
@@ -110,7 +148,7 @@ class RootCoreManager(private val context: Context) {
         } finally { connection.disconnect() }
     }
 
-    private fun extractRelease(zip: File) {
+    private fun extractRelease(zip: File, previousVersion: String) {
         coreDir.mkdirs()
         val tempCore = File(coreDir, "${coreFile.name}.tmp")
         val tempCli = File(coreDir, "${cliFile.name}.tmp")
@@ -157,18 +195,19 @@ class RootCoreManager(private val context: Context) {
                     throw IllegalStateException("官方压缩包中缺少 easytier-core 或 easytier-cli")
                 }
             }
-            replaceBinaries(tempCore, tempCli)
+            replaceBinaries(tempCore, tempCli, previousVersion)
         } finally {
             tempCore.delete()
             tempCli.delete()
         }
     }
 
-    private fun replaceBinaries(tempCore: File, tempCli: File) {
+    private fun replaceBinaries(tempCore: File, tempCli: File, previousVersion: String) {
         val oldCore = File(coreDir, "${coreFile.name}.previous")
         val oldCli = File(coreDir, "${cliFile.name}.previous")
         oldCore.delete()
         oldCli.delete()
+        previousVersionFile.delete()
         val hadCore = coreFile.exists()
         val hadCli = cliFile.exists()
         try {
@@ -176,13 +215,13 @@ class RootCoreManager(private val context: Context) {
             if (hadCli && !cliFile.renameTo(oldCli)) throw IllegalStateException("无法替换现有 easytier-cli")
             if (!tempCore.renameTo(coreFile)) throw IllegalStateException("无法安装 easytier-core")
             if (!tempCli.renameTo(cliFile)) throw IllegalStateException("无法安装 easytier-cli")
-            oldCore.delete()
-            oldCli.delete()
+            if (hadCore && hadCli) previousVersionFile.writeText(previousVersion.ifBlank { "上一版本" })
         } catch (error: Exception) {
             coreFile.delete()
             cliFile.delete()
             if (hadCore) oldCore.renameTo(coreFile)
             if (hadCli) oldCli.renameTo(cliFile)
+            previousVersionFile.delete()
             throw error
         }
     }
@@ -211,6 +250,6 @@ class RootCoreManager(private val context: Context) {
     }
 
     companion object {
-        private const val MANAGER_CLIENT_VERSION = "2"
+        private const val MANAGER_CLIENT_VERSION = "3"
     }
 }

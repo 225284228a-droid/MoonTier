@@ -4,18 +4,17 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use easytier::{
     common::config::{ConfigLoader, TomlConfigLoader},
-    launcher::NetworkConfig,
     proto::{
         api::manage::{
             CollectNetworkInfoRequest, DeleteNetworkInstanceRequest,
-            ListNetworkInstanceMetaRequest, ListNetworkInstanceRequest,
+            ListNetworkInstanceMetaRequest, ListNetworkInstanceRequest, NetworkConfig,
             RunNetworkInstanceRequest, WebClientService, WebClientServiceClientFactory,
         },
-        rpc_impl::standalone::StandAloneClient,
+        rpc::standalone::runtime_rpc_client,
         rpc_types::controller::BaseController,
     },
-    tunnel::tcp::TcpTunnelConnector,
 };
+use easytier_core::config::api_input::NetworkConfigExt;
 use serde_json::json;
 
 #[derive(Parser)]
@@ -40,14 +39,13 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let portal = if cli.rpc_portal.contains("://") {
+    let transport = if cli.rpc_portal.contains("://") {
         cli.rpc_portal
     } else {
         format!("tcp://{}", cli.rpc_portal)
     };
-    let mut rpc = StandAloneClient::new(TcpTunnelConnector::new(
-        portal.parse().context("invalid RPC portal")?,
-    ));
+    let portal = transport.parse().context("invalid RPC portal")?;
+    let mut rpc = runtime_rpc_client(portal);
     let client = rpc
         .scoped_client::<WebClientServiceClientFactory<BaseController>>(String::new())
         .await

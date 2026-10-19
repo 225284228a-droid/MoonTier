@@ -145,11 +145,14 @@ class RootTierController(private val context: Context) {
                         val options = loadManagerOptions()
                             ?: optionsFromSettings(store.loadSettings(), enabled = false)
                         val restartManager = managerAlive()
+                        val versionBeforeInstall = coreManager.installedVersion()
+                        var installedVersion = versionBeforeInstall
                         if (restartManager) stopManagerBlocking()
                         try {
                             val version = install { progress, _ ->
                                 state = state.copy(core = state.core.copy(progress = progress))
                             }
+                            installedVersion = version
                             val refreshed = if (restartManager) {
                                 ensureManagerBlocking(options)
                                 val snapshot = queryManagerSnapshot()
@@ -158,8 +161,28 @@ class RootTierController(private val context: Context) {
                             } else {
                                 null
                             }
-                            version to refreshed
+                            CoreInstallOutcome(version, refreshed, "")
                         } catch (error: Exception) {
+                            val replaced = coreManager.installedVersion() != versionBeforeInstall
+                            if (restartManager && replaced && coreManager.hasRollback()) {
+                                val recovered = runCatching {
+                                    if (managerAlive()) stopManagerBlocking()
+                                    val restored = coreManager.rollback()
+                                    ensureManagerBlocking(options)
+                                    val snapshot = queryManagerSnapshot()
+                                    applyRootRouting(snapshot)
+                                    restored to refreshedState(snapshot, options)
+                                }
+                                recovered.onSuccess { (restored, refreshed) ->
+                                    AppDiagnostics.warn("root", "core $installedVersion failed to start; rolled back to $restored")
+                                    return@withLock CoreInstallOutcome(
+                                        installedVersion, refreshed, restored,
+                                        "核心 $installedVersion 启动失败，已回退到 $restored"
+                                    )
+                                }.onFailure {
+                                    AppDiagnostics.error("root", "core rollback failed", it)
+                                }
+                            }
                             if (restartManager && coreManager.isReady()) {
                                 runCatching { ensureManagerBlocking(options) }
                                     .onFailure { AppDiagnostics.error("root", "failed to restore manager after core installation", it) }
@@ -169,25 +192,79 @@ class RootTierController(private val context: Context) {
                     }
                 }
             }
-            result.onSuccess { (version, refreshed) ->
+            result.onSuccess { outcome ->
                 AppDiagnostics.event("root", "core installed")
+                val rolledBack = outcome.rolledBackTo.isNotBlank()
                 state = state.copy(
                     core = RootCoreState(
                         ready = true,
-                        installedVersion = version,
+                        installedVersion = if (rolledBack) outcome.rolledBackTo else outcome.version,
                         latestVersion = state.core.latestVersion,
                         progress = 100,
-                        message = "已安装核心 $version"
+                        message = if (rolledBack) outcome.message else "已安装核心 ${outcome.version}",
+                        hasRollback = coreManager.hasRollback()
                     ),
-                    instances = refreshed?.instances ?: state.instances,
-                    configServer = refreshed?.configServer ?: state.configServer
+                    instances = outcome.refreshed?.instances ?: state.instances,
+                    configServer = outcome.refreshed?.configServer ?: state.configServer
                 )
             }.onFailure { error ->
                 AppDiagnostics.error("root", "core installation failed", error)
                 state = state.copy(
                     core = state.core.copy(
                         installing = false,
+                        hasRollback = coreManager.hasRollback(),
                         message = error.message ?: "安装核心失败"
+                    )
+                )
+            }
+        }
+    }
+
+    fun rollbackCore() {
+        if (state.core.installing || state.core.checking || !coreManager.hasRollback()) return
+        scope.launch {
+            state = state.copy(core = state.core.copy(installing = true, progress = 0, message = "正在回退核心"))
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    managerMutex.withLock {
+                        val options = loadManagerOptions()
+                            ?: optionsFromSettings(store.loadSettings(), enabled = false)
+                        val restartManager = managerAlive()
+                        if (restartManager) stopManagerBlocking()
+                        val restored = coreManager.rollback()
+                        val refreshed = if (restartManager) {
+                            ensureManagerBlocking(options)
+                            val snapshot = queryManagerSnapshot()
+                            applyRootRouting(snapshot)
+                            refreshedState(snapshot, options)
+                        } else {
+                            null
+                        }
+                        restored to refreshed
+                    }
+                }
+            }
+            result.onSuccess { (restored, refreshed) ->
+                AppDiagnostics.event("root", "core rolled back to $restored")
+                state = state.copy(
+                    core = RootCoreState(
+                        ready = true,
+                        installedVersion = restored,
+                        latestVersion = state.core.latestVersion,
+                        progress = 100,
+                        message = "已回退到核心 $restored",
+                        hasRollback = coreManager.hasRollback()
+                    ),
+                    instances = refreshed?.instances ?: state.instances,
+                    configServer = refreshed?.configServer ?: state.configServer
+                )
+            }.onFailure { error ->
+                AppDiagnostics.error("root", "core rollback failed", error)
+                state = state.copy(
+                    core = state.core.copy(
+                        installing = false,
+                        hasRollback = coreManager.hasRollback(),
+                        message = error.message ?: "回退核心失败"
                     )
                 )
             }
@@ -425,7 +502,8 @@ class RootTierController(private val context: Context) {
         state = state.copy(
             core = RootCoreState(
                 ready = coreManager.isReady(),
-                installedVersion = coreManager.installedVersion()
+                installedVersion = coreManager.installedVersion(),
+                hasRollback = coreManager.hasRollback()
             )
         )
     }
@@ -1224,6 +1302,13 @@ class RootTierController(private val context: Context) {
     private data class RefreshedState(
         val instances: List<RootInstanceState>,
         val configServer: RootConfigServerState
+    )
+
+    private data class CoreInstallOutcome(
+        val version: String,
+        val refreshed: RefreshedState?,
+        val rolledBackTo: String,
+        val message: String = ""
     )
 
     companion object {

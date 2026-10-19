@@ -323,7 +323,7 @@ class EasyTierController private constructor(private val context: Context) {
                 cfg.exitNodes.any { exit -> nodes.any { it.ip == exit.substringBefore('/') } })
         }
         val json = sharedVpnRequest(tunConfig, directIps, mtu, exitRoutes)
-        state = RuntimeState(running = true, statusText = "${members.size} 个网络共享 VPN",
+        state = RuntimeState(running = true, statusText = "VPN 已连接",
             localCidr = addresses.joinToString(), nodes = instances.flatMap { it.nodes },
             logs = members.flatMap { infos.optJSONObject(it.instanceName)?.let(::collectLogs).orEmpty() })
         val id = "shared-vpn"

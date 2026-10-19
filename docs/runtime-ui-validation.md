@@ -7,7 +7,8 @@ Validation date: 2026-10-20.
 - Bundled Android FFI: EasyTier `5af90471bfe654d097f7e488a2699f2850db7dd2`
   (2.7.0 development line with shared mobile TUN), plus the committed
   `tools/ffi-runtime/easytier-ffi-android.patch`. Recipe: `tools/ffi-runtime/README.md`.
-- Root control helper remains built against the v2.6.4 RPC schema. Downloaded
+- Root control helper is built against the upstream `5af90471` (2.7.0
+  development) schema so it can carry the current configuration fields. Downloaded
   Root cores are independent of the bundled FFI and can use stable, prerelease,
   or nightly upstream assets.
 
@@ -110,3 +111,32 @@ replacing a live Root core, and full visual/theme acceptance were not exercised.
 - Discarded the new profile and restored the original light theme. Existing
   profiles, Root mode, source selection and installed core were preserved.
   No network instance was started in this focused UI/config-parser pass.
+
+## Compact configuration and Root nightly follow-up (2026-10-20)
+
+- `TomlCodec` now writes only settings that differ from the core defaults.
+  DHCP mode, `private_mode` and `default_protocol` stay explicit because their
+  defaults differ between EasyTier 2.6 and 2.7; compression uses the numeric
+  enum so the 2.6 TOML parser does not panic on a name.
+- The configuration editor groups options as basic settings, addressing,
+  servers, transport, P2P/NAT, network services, proxy/port forwarding,
+  performance, access control (ACL) and raw TOML. Secure mode and its node keys
+  now sit in basic settings; the access whitelists sit with ACL.
+- VPN mode uses the profile selector and the selected profile's status only.
+  The separate "shared VPN" status card and the all-profile session list were
+  removed; Root mode keeps its independent instance list.
+- Selector menu rows use tighter vertical padding and title/subtitle spacing.
+- The bundled Root manager client was rebuilt against upstream `5af90471`
+  (2.7.0 development) and the helper version was bumped, so Root mode can parse
+  the current WireGuard portal, managed-credential and DHCPv6 fields.
+- WSL RPC checks: the new helper listed, started and left running both a compact
+  profile and a profile with `[vpn_portal_config]` on the nightly core; the same
+  helper started a compact profile on the stable 2.6.4 core. The previous helper
+  rejected the new portal section with `missing field client_cidr`.
+- The cross-built `aarch64-unknown-linux-musl` helper was executed under
+  `qemu-aarch64-static`: it printed help, listed the manager, and started a
+  compact profile against the nightly core. The debug APK contains the same
+  helper bytes (SHA-256 `61d5bcab…4db82d`).
+- `gradle testDebugUnitTest assembleDebug --offline` passed: 25 tests, zero
+  failures, including the updated codec checks for default omission, numeric
+  compression, and compact round trips.

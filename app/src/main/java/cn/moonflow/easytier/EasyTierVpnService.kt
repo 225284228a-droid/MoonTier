@@ -1,4 +1,4 @@
-﻿package cn.moonflow.easytier
+package cn.moonflow.easytier
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -101,7 +101,7 @@ class EasyTierVpnService : VpnService() {
         val dns = config.stringValue("dns")
         val builder = Builder().setSession("MoonTier")
             .setMtu(config.optInt("mtu", 1400)).setBlocking(false)
-        require(addresses.length() > 0) { "共享 VPN 没有可用地址" }
+        require(addresses.length() > 0) { "VPN 没有可用地址" }
         for (index in 0 until addresses.length()) {
             val parts = addresses.getString(index).split('/')
             builder.addAddress(parts[0], parts[1].toInt())

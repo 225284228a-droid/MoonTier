@@ -14,11 +14,15 @@ object TomlCodec {
         out += "instance_name = \"${esc(config.instanceName)}\""
         if (config.rpcPortal.isNotBlank()) out += "rpc_portal = \"${esc(config.rpcPortal)}\""
         if (config.hostname.isNotBlank()) out += "hostname = \"${esc(config.hostname)}\""
+        // dhcp and dhcpv6 default to false in EasyTier, while MoonTier defaults to
+        // DHCP on. State the chosen mode so a compact file keeps the same behavior.
         out += "dhcp = ${if (config.dhcp && advanced.dhcpCidr.isNotBlank()) "\"${esc(advanced.dhcpCidr.trim())}\"" else config.dhcp.toString()}"
-        out += "dhcpv6 = ${if (advanced.dhcpv6 && advanced.dhcpv6Cidr.isNotBlank()) "\"${esc(advanced.dhcpv6Cidr.trim())}\"" else advanced.dhcpv6.toString()}"
+        if (advanced.dhcpv6) {
+            out += "dhcpv6 = ${if (advanced.dhcpv6Cidr.isNotBlank()) "\"${esc(advanced.dhcpv6Cidr.trim())}\"" else "true"}"
+        }
         if (!advanced.dhcpv6) text("ipv6", advanced.ipv6)
-        out += "ipv6_public_addr_provider = ${advanced.ipv6PublicAddrProvider}"
-        out += "ipv6_public_addr_auto = ${advanced.ipv6PublicAddrAuto}"
+        if (advanced.ipv6PublicAddrProvider) out += "ipv6_public_addr_provider = true"
+        if (advanced.ipv6PublicAddrAuto) out += "ipv6_public_addr_auto = true"
         text("ipv6_public_addr_prefix", advanced.ipv6PublicAddrPrefix)
         text("socks5_proxy", advanced.socks5Proxy)
         list("mapped_listeners", advanced.mappedListeners)
@@ -28,63 +32,90 @@ object TomlCodec {
         list("udp_whitelist", advanced.udpWhitelist)
         if (advanced.extraRootToml.isNotBlank()) out += advanced.extraRootToml
         if (!config.dhcp && config.ipv4.isNotBlank()) out += "ipv4 = \"${esc(config.ipv4)}\""
-        if (config.listenerUrls.isNotEmpty()) out += "listeners = ${array(config.listenerUrls)}"
-        if (config.stunServers.isNotEmpty()) out += "stun_servers = ${array(config.stunServers)}"
+        list("listeners", config.listenerUrls)
+        list("stun_servers", config.stunServers)
         if (config.enableManualRoutes) out += "routes = ${array(config.routes)}"
-        if (config.exitNodes.isNotEmpty()) out += "exit_nodes = ${array(config.exitNodes)}"
+        list("exit_nodes", config.exitNodes)
 
         out += ""
         out += "[network_identity]"
         out += "network_name = \"${esc(config.networkName)}\""
-        out += "network_secret = \"${esc(config.networkSecret)}\""
+        if (config.networkSecret.isNotBlank()) out += "network_secret = \"${esc(config.networkSecret)}\""
 
-        out += ""
-        out += "[flags]"
-        text("dev_name", advanced.devName)
-        text("data_compress_algo", when (advanced.dataCompressAlgo.lowercase()) { "none", "1" -> "None"; "zstd", "2" -> "Zstd"; else -> advanced.dataCompressAlgo })
-        if (advanced.multiThreadCount.isNotBlank()) out += "multi_thread_count = ${advanced.multiThreadCount.trim()}"
-        unsigned64("instance_recv_bps_limit", advanced.instanceRecvBpsLimit, out)
-        unsigned64("foreign_relay_bps_limit", advanced.foreignRelayBpsLimit, out)
-        text("tld_dns_zone", advanced.tldDnsZone)
-        if (advanced.socketMark.isNotBlank()) out += "socket_mark = ${advanced.socketMark.trim()}"
-        out += "disable_relay_data = ${advanced.disableRelayData}"
-        out += "enable_udp_broadcast_relay = ${advanced.enableUdpBroadcastRelay}"
-        out += "prefer_peer_relay = ${advanced.preferPeerRelay}"
-        if (advanced.extraFlagsToml.isNotBlank()) out += advanced.extraFlagsToml
-        out += "enable_encryption = ${config.enableEncryption}"
-        out += "enable_ipv6 = ${!config.disableIpv6}"
-        out += "latency_first = ${config.latencyFirst}"
-        out += "enable_exit_node = ${config.enableExitNode}"
-        out += "no_tun = ${config.noTun}"
-        out += "use_smoltcp = ${config.useSmoltcp}"
-        out += "enable_kcp_proxy = ${config.enableKcpProxy}"
-        out += "disable_kcp_input = ${config.disableKcpInput}"
-        out += "enable_quic_proxy = ${config.enableQuicProxy}"
-        out += "disable_quic_input = ${config.disableQuicInput}"
-        out += "disable_relay_kcp = ${config.disableRelayKcp}"
-        out += "disable_relay_quic = ${config.disableRelayQuic}"
-        out += "enable_relay_foreign_network_kcp = ${config.enableRelayForeignNetworkKcp}"
-        out += "enable_relay_foreign_network_quic = ${config.enableRelayForeignNetworkQuic}"
-        out += "bind_device = ${config.bindDevice}"
-        out += "private_mode = ${config.enablePrivateMode}"
-        out += "disable_p2p = ${config.disableP2p}"
-        out += "need_p2p = ${config.needP2p}"
-        out += "lazy_p2p = ${config.lazyP2p}"
-        out += "p2p_only = ${config.p2pOnly}"
-        out += "multi_thread = ${config.multiThread}"
-        out += "accept_dns = ${config.enableMagicDns}"
-        out += "disable_sym_hole_punching = ${config.disableSymHolePunching}"
-        out += "relay_all_peer_rpc = ${config.relayAllPeerRpc}"
-        out += "disable_udp_hole_punching = ${config.disableUdpHolePunching}"
-        out += "disable_tcp_hole_punching = ${config.disableTcpHolePunching}"
-        out += "disable_upnp = ${config.disableUpnp}"
-        out += "proxy_forward_by_system = ${config.proxyForwardBySystem}"
-        if (config.mtu > 0) out += "mtu = ${config.mtu}"
-        if (config.enableRelayNetworkWhitelist) {
-            out += "relay_network_whitelist = \"${esc(config.relayNetworkWhitelist.cleanItems().joinToString(" "))}\""
+        // Only state flags that differ from the core defaults. An omitted flag
+        // keeps its core default, so the generated TOML stays short and remains
+        // readable for both the bundled FFI and downloaded official cores.
+        val flags = ArrayList<String>()
+        fun flag(key: String, value: Boolean, default: Boolean = false) {
+            if (value != default) flags += "$key = $value"
         }
-        out += "default_protocol = \"${esc(config.defaultProtocol)}\""
-        out += "encryption_algorithm = \"${esc(config.encryptionAlgorithm)}\""
+        if (advanced.devName.isNotBlank()) flags += "dev_name = \"${esc(advanced.devName)}\""
+        val compressionCode = when (advanced.dataCompressAlgo.lowercase()) {
+            "none", "1", "" -> 1
+            "zstd", "2" -> 2
+            else -> null
+        }
+        // Numeric enum values are understood by both EasyTier 2.6 and 2.7;
+        // 2.6 panics when the TOML carries the enum name instead.
+        if (compressionCode != null) {
+            if (compressionCode != 1) flags += "data_compress_algo = $compressionCode"
+        } else if (advanced.dataCompressAlgo.isNotBlank()) {
+            flags += "data_compress_algo = \"${esc(advanced.dataCompressAlgo)}\""
+        }
+        if (advanced.multiThreadCount.isNotBlank()) flags += "multi_thread_count = ${advanced.multiThreadCount.trim()}"
+        unsigned64("instance_recv_bps_limit", advanced.instanceRecvBpsLimit, flags)
+        unsigned64("foreign_relay_bps_limit", advanced.foreignRelayBpsLimit, flags)
+        if (advanced.tldDnsZone.isNotBlank() && advanced.tldDnsZone != "et.net.") {
+            flags += "tld_dns_zone = \"${esc(advanced.tldDnsZone)}\""
+        }
+        if (advanced.socketMark.isNotBlank()) flags += "socket_mark = ${advanced.socketMark.trim()}"
+        flag("disable_relay_data", advanced.disableRelayData)
+        flag("enable_udp_broadcast_relay", advanced.enableUdpBroadcastRelay)
+        flag("prefer_peer_relay", advanced.preferPeerRelay)
+        if (advanced.extraFlagsToml.isNotBlank()) flags += advanced.extraFlagsToml
+        flag("enable_encryption", config.enableEncryption, true)
+        flag("enable_ipv6", !config.disableIpv6, true)
+        flag("latency_first", config.latencyFirst)
+        flag("enable_exit_node", config.enableExitNode)
+        flag("no_tun", config.noTun)
+        flag("use_smoltcp", config.useSmoltcp)
+        flag("enable_kcp_proxy", config.enableKcpProxy)
+        flag("disable_kcp_input", config.disableKcpInput)
+        flag("enable_quic_proxy", config.enableQuicProxy)
+        flag("disable_quic_input", config.disableQuicInput)
+        flag("disable_relay_kcp", config.disableRelayKcp)
+        flag("disable_relay_quic", config.disableRelayQuic)
+        flag("enable_relay_foreign_network_kcp", config.enableRelayForeignNetworkKcp)
+        flag("enable_relay_foreign_network_quic", config.enableRelayForeignNetworkQuic)
+        flag("bind_device", config.bindDevice, true)
+        // EasyTier 2.6 still defaults private_mode to false; always state the
+        // chosen value so a profile behaves the same before and after a core update.
+        flags += "private_mode = ${config.enablePrivateMode}"
+        flag("disable_p2p", config.disableP2p)
+        flag("need_p2p", config.needP2p)
+        flag("lazy_p2p", config.lazyP2p)
+        flag("p2p_only", config.p2pOnly)
+        flag("multi_thread", config.multiThread, true)
+        flag("accept_dns", config.enableMagicDns)
+        flag("disable_sym_hole_punching", config.disableSymHolePunching)
+        flag("relay_all_peer_rpc", config.relayAllPeerRpc)
+        flag("disable_udp_hole_punching", config.disableUdpHolePunching)
+        flag("disable_tcp_hole_punching", config.disableTcpHolePunching)
+        flag("disable_upnp", config.disableUpnp)
+        flag("proxy_forward_by_system", config.proxyForwardBySystem)
+        if (config.mtu > 0 && config.mtu != DEFAULT_MTU) flags += "mtu = ${config.mtu}"
+        if (config.enableRelayNetworkWhitelist) {
+            flags += "relay_network_whitelist = \"${esc(config.relayNetworkWhitelist.cleanItems().joinToString(" "))}\""
+        }
+        // 2.6 defaults to tcp, 2.7 to udp; always state it to keep one profile's
+        // transport preference stable across core versions.
+        flags += "default_protocol = \"${esc(config.defaultProtocol.ifBlank { "tcp" })}\""
+        if (config.encryptionAlgorithm != "aes-gcm") flags += "encryption_algorithm = \"${esc(config.encryptionAlgorithm)}\""
+        if (flags.isNotEmpty()) {
+            out += ""
+            out += "[flags]"
+            out += flags
+        }
 
         config.peerUrls.cleanItems().forEach {
             out += ""
@@ -306,6 +337,8 @@ object TomlCodec {
             isDefault = false
         )
     }
+
+    private const val DEFAULT_MTU = 1380
 
     private val knownRootKeys = setOf(
         "dhcp", "dhcpv6", "exit_nodes", "hostname", "instance_id", "instance_name", "ipv4", "ipv6",

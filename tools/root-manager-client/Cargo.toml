@@ -7,9 +7,12 @@ publish = false
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
-easytier = { git = "https://github.com/EasyTier/EasyTier.git", tag = "v2.6.4", default-features = false, features = ["zstd"] }
+easytier = { git = "https://github.com/EasyTier/EasyTier.git", rev = "5af90471bfe654d097f7e488a2699f2850db7dd2", default-features = false, features = ["zstd"] }
+easytier-core = { git = "https://github.com/EasyTier/EasyTier.git", rev = "5af90471bfe654d097f7e488a2699f2850db7dd2", default-features = false, features = ["management"] }
+easytier-proto = { git = "https://github.com/EasyTier/EasyTier.git", rev = "5af90471bfe654d097f7e488a2699f2850db7dd2", default-features = false, features = ["json-rpc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+url = "2"
 uuid = "1"
 
 [profile.release]

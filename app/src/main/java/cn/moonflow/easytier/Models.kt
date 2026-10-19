@@ -313,7 +313,8 @@ data class RootCoreState(
     val checking: Boolean = false,
     val installing: Boolean = false,
     val progress: Int = 0,
-    val message: String = ""
+    val message: String = "",
+    val hasRollback: Boolean = false
 )
 
 data class RootManagedNetworkState(
