@@ -27,6 +27,11 @@ class EasyTierVpnService : VpnService() {
     private var generation = -1L
     private val controller by lazy { EasyTierController.get(applicationContext) }
 
+    override fun onCreate() {
+        super.onCreate()
+        controller.onVpnServiceCreated(this)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, createNotification())
         if (intent?.action == ACTION_STOP) {
@@ -83,6 +88,7 @@ class EasyTierVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        controller.onVpnServiceDestroyed(this)
         serviceScope.cancel()
         controller.onVpnClosed(instanceId, generation, revoked = false)
         shutdownVpn()
@@ -143,6 +149,17 @@ class EasyTierVpnService : VpnService() {
         controller.detachTunFd(instanceId, generation)
         vpnInterface?.close()
         vpnInterface = null
+    }
+
+    internal suspend fun stopAndWait() {
+        val pending = attachJob
+        attachJob = null
+        pending?.cancelAndJoin()
+        disconnect()
+        instanceId = ""
+        generation = -1L
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun shutdownVpn() {

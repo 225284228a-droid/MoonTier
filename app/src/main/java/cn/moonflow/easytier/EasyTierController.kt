@@ -30,6 +30,7 @@ import org.json.JSONObject
 class EasyTierController private constructor(private val context: Context) {
     private val store = ConfigStore(context)
     private var service: EasyTierRuntimeService? = null
+    private var vpnService: EasyTierVpnService? = null
     private var scope: CoroutineScope? = null
     private var actions = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     private var initialized = false
@@ -387,8 +388,15 @@ class EasyTierController private constructor(private val context: Context) {
         }
     }
 
-    private fun closeVpn() {
-        if (gate.instanceId.isNotEmpty()) { gate.clear(); context.stopService(Intent(context, EasyTierVpnService::class.java)) }
+    private suspend fun closeVpn() {
+        if (gate.instanceId.isNotEmpty() || vpnService != null) {
+            gate.clear()
+            // Android keeps VpnService bound while its interface is open. Stopping
+            // the started service alone cannot release that system binding.
+            val owner = vpnService
+            if (owner != null) owner.stopAndWait()
+            else context.stopService(Intent(context, EasyTierVpnService::class.java))
+        }
         attachedGeneration = -1
         requestedGeneration = -1
         pendingVpnConfig = null
@@ -430,6 +438,11 @@ class EasyTierController private constructor(private val context: Context) {
         }
     }
 
+    internal fun onVpnServiceCreated(owner: EasyTierVpnService) { vpnService = owner }
+    internal fun onVpnServiceDestroyed(owner: EasyTierVpnService) {
+        if (vpnService === owner) vpnService = null
+    }
+
     internal fun onVpnAttached(id: String, generation: Long) {
         if (gate.accepts(id, generation)) { attachedGeneration = generation; pendingVpnConfig = null }
     }
@@ -443,7 +456,7 @@ class EasyTierController private constructor(private val context: Context) {
     fun onVpnServiceStartFailed(error: Throwable) { requestedGeneration = -1; reportError("VPN 接口启动失败", error) }
 
     suspend fun stopAllAndWait() {
-        if (scope == null) return
+        if (scope == null) { closeVpn(); return }
         val complete = CompletableDeferred<Unit>(scope?.coroutineContext?.get(Job))
         enqueue {
             try {

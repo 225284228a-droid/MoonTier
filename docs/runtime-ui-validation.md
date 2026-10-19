@@ -42,23 +42,33 @@ Validation date: 2026-10-20.
   JNI/CMake linking and APK packaging. The APK contains the rebuilt FFI library
   and the LF-normalized Root shell asset.
 
-## Device acceptance still required
+## Device checks (2026-10-20)
 
-`adb devices` returned no connected devices. No real-device UI or network
-acceptance is claimed. The main follow-up cases are:
+Device: Xiaomi 23113RKC6C, arm64. The APK was signed with the project's existing
+local signing configuration and upgraded in place without uninstalling the app.
 
-1. Start two local configurations on disjoint subnets and a Web configuration.
-   Verify one Android VPN interface contains all accepted addresses/routes,
-   and each configuration has independent nodes and start/stop controls.
-2. Introduce an overlapping subnet. Verify the conflict appears on that member
-   and existing members stay enabled. Stop/restart one accepted member while
-   traffic flows on another. Repeat with IPv6 and shared DNS.
-3. Cancel and retry VPN permission; recreate/revoke the VPN service and change
-   DHCP addresses/routes while attachment is in flight. Obsolete requests and
-   cleanup must not replace or detach the newer shared VPN.
-4. Switch Root to VPN and back with live networks, a stale PID, and a stopped
-   core. Confirm the old backend exits before target-mode operations.
-5. In Settings, choose each core source, check/download a core, and import a
-   local ZIP. Confirm a running Root manager restarts after replacement.
-6. Inspect configuration selectors, independent cards, long names, and theme
-   changes on an Android device.
+- Two isolated static-IP profiles ran together in VPN mode. `ip -4 addr` showed
+  `172.30.240.1/24` and `172.30.241.1/24` on the same TUN, and Android's VPN
+  routing table contained both subnets.
+- Stopping one profile removed its address and left the other profile enabled
+  with its own TUN address. Both profiles remained independently controllable.
+- Switching a running VPN to Root initially exposed a bound-service lifecycle
+  issue: `stopService` did not destroy the system-bound VpnService, leaving the
+  descriptor and VPN rules alive. The controller now explicitly awaits pending
+  attachment, native detach, and descriptor close before completing shutdown.
+- After that fix, switching a live VPN to Root left no app VPN service or TUN.
+  Root ran the two isolated subnets with two priority-20001 policy rules.
+  Switching Root back to VPN succeeded and removed both policy rules and TUNs.
+- The three download source choices worked on-device. Update checks returned
+  stable `v2.6.4`, prerelease `v2.7.0`, and a timestamped nightly build. The
+  installed Root core remained v2.6.4; no downloaded core was installed.
+- No AndroidRuntime crash appeared during these checks. Original profiles and
+  settings were restored, and temporary profile/runtime/Root files were removed.
+- The final signed debug APK was rebuilt with all 19 unit tests passing and
+  installed on the device.
+
+## Not covered by this focused device pass
+
+Live remote configuration-server mutations, peer-to-peer data transfer, subnet
+conflicts, IPv6/shared-DNS traffic, permission revocation races, downloading and
+replacing a live Root core, and full visual/theme acceptance were not exercised.
