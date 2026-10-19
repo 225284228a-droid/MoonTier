@@ -56,7 +56,7 @@ class EasyTierVpnService : VpnService() {
             }
             vpnInterface = pfd
             try {
-                controller.attachTunFd(id, token, config.getString("instanceName"), pfd.fd)
+                controller.attachTunFd(id, token, pfd.fd)
                 if (!controller.acceptsVpnRequest(id, token)) {
                     if (vpnInterface === pfd) disconnect()
                     return@launch
@@ -90,33 +90,17 @@ class EasyTierVpnService : VpnService() {
     }
 
     private fun createVpnInterface(config: JSONObject): ParcelFileDescriptor? = runCatching {
-        val address = config.optString("address", "10.0.0.2")
-        val prefix = config.optInt("prefixLength", 24).coerceIn(1, 32)
-        val mtu = config.optInt("mtu", 1400)
-        val dns = config.optString("dns", "")
+        val addresses = config.getJSONArray("addresses")
         val routes = config.optJSONArray("routes")
-        val routePreview = buildList {
-            if (routes != null) {
-                for (i in 0 until minOf(routes.length(), 8)) add(routes.optString(i))
-            }
+        val dns = config.stringValue("dns")
+        val builder = Builder().setSession("MoonTier · 多配置")
+            .setMtu(config.optInt("mtu", 1400)).setBlocking(false)
+        require(addresses.length() > 0) { "共享 VPN 没有可用地址" }
+        for (index in 0 until addresses.length()) {
+            val parts = addresses.getString(index).split('/')
+            builder.addAddress(parts[0], parts[1].toInt())
         }
-        Log.i(
-            TAG,
-                "createVpnInterface address=$address/$prefix mtu=$mtu routes=${routes?.length() ?: 0} " +
-                "exitAuto=${config.optBoolean("exitNodeAutoRoutes", false)} " +
-                "exitNodes=${config.optInt("exitNodeReachableCount", 0)}/${config.optInt("exitNodeCount", 0)} " +
-                "preview=$routePreview"
-        )
-        AppDiagnostics.info(
-            "vpn",
-            "creating interface address=$address/$prefix mtu=$mtu routes=${routes?.length() ?: 0} exitAuto=${config.optBoolean("exitNodeAutoRoutes", false)}"
-        )
-
-        val builder = Builder()
-            .setSession("MoonTier")
-            .setMtu(mtu)
-            .addAddress(address, prefix)
-            .setBlocking(false)
+        AppDiagnostics.info("vpn", "creating shared interface members=${config.optJSONArray("instanceIds")?.length()} addresses=${addresses.length()}")
 
         if (dns.isNotBlank()) builder.addDnsServer(dns)
         runCatching { builder.addDisallowedApplication(packageName) }
@@ -171,7 +155,7 @@ class EasyTierVpnService : VpnService() {
         val closingGeneration = generation
         instanceId = ""
         generation = -1L
-        // JNI may be waiting for the FFI lock before the native side duplicates this fd.
+        // Finish attachment and detach native readers before closing the caller-owned fd.
         CoroutineScope(Dispatchers.Main.immediate).launch {
             pending?.join()
             try {

@@ -1,2 +1,4 @@
 # Unified diff context keeps a leading space even on empty lines.
 tools/ffi-runtime/*.patch text eol=lf whitespace=-blank-at-eol
+
+*.sh text eol=lf

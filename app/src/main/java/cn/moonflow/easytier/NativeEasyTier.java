@@ -14,6 +14,8 @@ public final class NativeEasyTier {
     public static native int runNetworkInstance(String config);
     public static native int retainNetworkInstance(String[] instanceNames);
     public static native String collectNetworkInfos(int maxLength);
+    public static native String sharedTunConfig();
+    public static native int attachSharedTunFd(int fd);
     public static native int setTunFd(String instanceName, int fd);
     public static native int runNetworkInstanceWithSource(String config, int source);
     public static native int setNetworkInstanceEnabled(String instanceId, boolean enabled);

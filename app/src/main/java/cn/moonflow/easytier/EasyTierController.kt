@@ -49,9 +49,10 @@ class EasyTierController private constructor(private val context: Context) {
     private var requestedGeneration = -1L
     private var deniedInstanceId = ""
     private var lastNotification = ""
+    private var operationError = ""
     private var stopCompletion: CompletableDeferred<Unit>? = null
     private val tunOperations = Mutex()
-    private var nativeTunOwner: Triple<String, Long, String>? = null
+    private var nativeTunOwner: Pair<String, Long>? = null
 
     var state by mutableStateOf(RuntimeState())
         private set
@@ -67,8 +68,6 @@ class EasyTierController private constructor(private val context: Context) {
     fun start(config: NetworkConfig) = dispatch(Intent(context, EasyTierRuntimeService::class.java)
         .setAction(EasyTierRuntimeService.ACTION_START)
         .putExtra(EasyTierRuntimeService.EXTRA_CONFIG, config.toJson().toString()))
-
-    fun stop() = setInstanceEnabled(state.runningConfigId, false)
 
     fun setInstanceEnabled(id: String, enabled: Boolean) {
         if (id.isBlank()) return
@@ -135,6 +134,7 @@ class EasyTierController private constructor(private val context: Context) {
                 service?.stopSelfResult(startId)
                 return@enqueue
             }
+            operationError = ""
             initialize()
             when (intent?.action) {
                 EasyTierRuntimeService.ACTION_START -> {
@@ -142,6 +142,7 @@ class EasyTierController private constructor(private val context: Context) {
                     state = state.copy(starting = true, statusText = "正在启动 ${config.displayName}")
                     deniedInstanceId = ""
                     native { NativeEasyTier.runNetworkInstanceWithSource(TomlCodec.build(config.withRuntimeHostname()), 0) }
+                    gate.invalidate()
                 }
                 EasyTierRuntimeService.ACTION_ENABLE_INSTANCE, EasyTierRuntimeService.ACTION_STOP_INSTANCE -> {
                     deniedInstanceId = ""
@@ -241,19 +242,34 @@ class EasyTierController private constructor(private val context: Context) {
         val events = JSONArray(native { NativeEasyTier.drainConfigServerEvents() })
         for (index in 0 until events.length()) {
             val event = events.optJSONObject(index) ?: continue
-            if (event.optLong("generation") != serverGeneration) continue
             val payload = event.optJSONObject("payload") ?: continue
+            val eventGeneration = event.optLong("generation")
+            if (eventGeneration == -1L) {
+                if (payload.stringValue("event") in setOf("instance_exited", "event_lagged")) gate.invalidate()
+                continue
+            }
+            if (eventGeneration != serverGeneration) continue
+            // A remote update can replace an instance without changing UUID or routes.
+            if (payload.stringValue("event") == "run_network_instance") gate.invalidate()
             if (!payload.optBoolean("success", true)) configServerState = configServerState.copy(error = payload.stringValue("error"))
         }
         val localNames = store.loadConfigs().associate { it.id to it.displayName }
-        val selected = configs.firstOrNull { it.enabled && !it.noTun }
+        val tunConfig = JSONObject(native { NativeEasyTier.sharedTunConfig() })
+        val acceptedIds = tunConfig.optJSONArray("instance_ids")?.toStringList().orEmpty().toSet()
+        val rejected = tunConfig.optJSONArray("rejected") ?: JSONArray()
+        val tunErrors = buildMap {
+            for (index in 0 until rejected.length()) {
+                val item = rejected.optJSONObject(index) ?: continue
+                put(item.stringValue("instance_id"), item.stringValue("error"))
+            }
+        }
         instances = configs.map { entry ->
             val info = infos.optJSONObject(entry.instanceName)
-            val error = info?.stringValue("error_msg").orEmpty()
+            val error = tunErrors[entry.instanceId] ?: info?.stringValue("error_msg").orEmpty()
             FfiInstanceState(entry.instanceId, entry.instanceName,
                 localNames[entry.instanceId] ?: entry.instanceName, entry.source, entry.noTun, entry.enabled,
                 entry.enabled && info?.optBoolean("running", true) == true && error.isBlank(),
-                activeVpn = entry.instanceId == selected?.instanceId,
+                activeVpn = entry.instanceId in acceptedIds,
                 localCidr = info?.let(::extractLocalCidr).orEmpty(),
                 nodes = info?.let(::parseNodes).orEmpty(), error = error)
         }
@@ -263,7 +279,8 @@ class EasyTierController private constructor(private val context: Context) {
         configServerState = configServerState.copy(running = serverActive, starting = false, stopping = false,
             connected = serverActive && native { NativeEasyTier.isConfigServerClientConnected() },
             serverUrl = serverUrl, managedNetworks = managed)
-        reconcileVpn(selected, selected?.let { infos.optJSONObject(it.instanceName) })
+        reconcileVpn(tunConfig, infos)
+        if (operationError.isNotBlank()) state = state.copy(statusText = operationError)
         val notification = when {
             vpnPermissionRequired -> "等待 VPN 授权，点击打开应用"
             state.running -> state.statusText
@@ -275,37 +292,47 @@ class EasyTierController private constructor(private val context: Context) {
         if (notification != lastNotification) { lastNotification = notification; service?.updateStatus(notification) }
     }
 
-    private suspend fun reconcileVpn(entry: FfiRuntimeConfig?, info: JSONObject?) {
-        if (entry == null || info == null || !info.optBoolean("running", true) || info.stringValue("error_msg").isNotBlank()) {
+    private suspend fun reconcileVpn(tunConfig: JSONObject, infos: JSONObject) {
+        val members = configs.filter { it.instanceId in tunConfig.optJSONArray("instance_ids")?.toStringList().orEmpty() }
+        val addresses = tunConfig.optJSONArray("addresses")?.toStringList().orEmpty()
+        if (members.isEmpty() || addresses.isEmpty()) {
             closeVpn()
-            state = RuntimeState(statusText = if (entry != null) info?.stringValue("error_msg").orEmpty().ifBlank { "等待网络实例" } else "EasyTier 未运行")
+            state = RuntimeState(running = instances.any { it.running },
+                statusText = when {
+                    instances.any { it.running && it.noTun } -> "无 TUN 网络正在运行"
+                    instances.any { it.enabled } -> "等待网络地址"
+                    else -> "EasyTier 未运行"
+                })
             return
         }
-        val cidr = extractLocalCidr(info)
-        val current = instances.first { it.instanceId == entry.instanceId }
-        state = RuntimeState(running = true, runningConfigId = entry.instanceId,
-            statusText = if (cidr.isBlank()) "等待虚拟 IP" else "已连接: $cidr", localCidr = cidr,
-            nodes = current.nodes, logs = collectLogs(info))
-        if (cidr.isBlank()) { closeVpn(); return }
-        val cfg = vpnConfig(entry)
-        val overlay = Ipv4.cidrToRange(cidr)
-        val ips = (endpointIps[entry.instanceId].orEmpty() + collectDynamicCoreIps(info)).filterNot {
-            Ipv4.parseAddress(it)?.let { ip -> overlay?.contains(ip) } == true
-        }.take(64).toSet()
-        resolveEndpoints(entry, cfg)
-        val routeIps = current.nodes.map { it.ip }.toSet()
-        val reachable = cfg.exitNodes.count { it.substringBefore('/') in routeIps }
-        val exitRoutes = store.loadSettings().exitNodeAutoRoutes && reachable > 0 && Build.VERSION.SDK_INT >= 33
-        val json = buildVpnConfigJson(cfg, cidr, collectPeerProxyCidrs(info), ips, exitRoutes, exitNodeReachableCount = reachable)
-        val previousId = gate.instanceId
-        val token = gate.select(entry.instanceId, json)
-        if (previousId != entry.instanceId && previousId.isNotBlank()) context.stopService(Intent(context, EasyTierVpnService::class.java))
+        val directIps = linkedSetOf<String>()
+        val ranges = addresses.mapNotNull(Ipv4::cidrToRange)
+        var mtu = 1400
+        var exitRoutes = false
+        for (entry in members) {
+            val info = infos.optJSONObject(entry.instanceName) ?: continue
+            val cfg = vpnConfig(entry)
+            resolveEndpoints(entry, cfg)
+            directIps += (endpointIps[entry.instanceId].orEmpty() + collectDynamicCoreIps(info)).filterNot {
+                Ipv4.parseAddress(it)?.let { ip -> ranges.any { range -> ip in range } } == true
+            }
+            if (cfg.mtu > 0) mtu = minOf(mtu, cfg.mtu)
+            val nodes = instances.firstOrNull { it.instanceId == entry.instanceId }?.nodes.orEmpty()
+            exitRoutes = exitRoutes || (store.loadSettings().exitNodeAutoRoutes && Build.VERSION.SDK_INT >= 33 &&
+                cfg.exitNodes.any { exit -> nodes.any { it.ip == exit.substringBefore('/') } })
+        }
+        val json = sharedVpnRequest(tunConfig, directIps, mtu, exitRoutes)
+        state = RuntimeState(running = true, statusText = "${members.size} 个网络共享 VPN",
+            localCidr = addresses.joinToString(), nodes = instances.flatMap { it.nodes },
+            logs = members.flatMap { infos.optJSONObject(it.instanceName)?.let(::collectLogs).orEmpty() })
+        val id = "shared-vpn"
+        val token = gate.select(id, json)
         if (attachedGeneration == token) return
-        val request = JSONObject(json).put("instanceId", entry.instanceId).put("generation", token).toString()
+        val request = JSONObject(json).put("instanceId", id).put("generation", token).toString()
         if (VpnService.prepare(context) != null) {
             vpnPermissionRequired = true
-            state = state.copy(statusText = if (deniedInstanceId == entry.instanceId) "VPN 授权已取消" else "等待 VPN 授权")
-            if (deniedInstanceId != entry.instanceId) pendingVpnConfig = request
+            state = state.copy(statusText = if (deniedInstanceId == id) "VPN 授权已取消" else "等待 VPN 授权")
+            if (deniedInstanceId != id) pendingVpnConfig = request
             return
         }
         vpnPermissionRequired = false
@@ -378,12 +405,12 @@ class EasyTierController private constructor(private val context: Context) {
     }
     fun requestVpnAuthorization() { deniedInstanceId = ""; requestRefresh() }
     internal fun acceptsVpnRequest(id: String, generation: Long) = gate.accepts(id, generation)
-    internal suspend fun attachTunFd(id: String, generation: Long, name: String, fd: Int): Boolean =
+    internal suspend fun attachTunFd(id: String, generation: Long, fd: Int): Boolean =
         withContext(NonCancellable) {
             tunOperations.withLock {
                 if (!gate.accepts(id, generation)) return@withLock false
-                native { NativeEasyTier.setTunFd(name, fd) }
-                nativeTunOwner = Triple(id, generation, name)
+                native { NativeEasyTier.attachSharedTunFd(fd) }
+                nativeTunOwner = id to generation
                 true
             }
         }
@@ -393,7 +420,7 @@ class EasyTierController private constructor(private val context: Context) {
             val owner = nativeTunOwner ?: return@withLock
             if (owner.first != id || owner.second != generation) return@withLock
             try {
-                native { NativeEasyTier.setTunFd(owner.third, -1) }
+                native { NativeEasyTier.attachSharedTunFd(-1) }
             } catch (error: Exception) {
                 // A replaced or stopped instance has already released its native descriptor.
                 AppDiagnostics.warn("vpn", "TUN detach: ${error.message}")
@@ -475,7 +502,8 @@ class EasyTierController private constructor(private val context: Context) {
 
     private fun reportError(title: String, error: Throwable) {
         AppDiagnostics.error("ffi", title, error)
-        state = state.copy(starting = false, stopping = false, statusText = "$title: ${error.message ?: "未知错误"}")
+        operationError = "$title: ${error.message ?: "未知错误"}"
+        state = state.copy(starting = false, stopping = false, statusText = operationError)
     }
 
     private suspend fun <T> native(block: () -> T): T = withContext(Dispatchers.IO) { block() }
@@ -491,11 +519,6 @@ class EasyTierController private constructor(private val context: Context) {
         val address = ipv4.optJSONObject("address")?.optLong("addr") ?: return ""
         if (address == 0L) return ""
         return "${Ipv4.intToAddress(address)}/${ipv4.optInt("network_length", 24).coerceIn(1, 32)}"
-    }
-
-    private fun collectPeerProxyCidrs(info: JSONObject): Set<String> = buildSet {
-        val routes = info.optJSONArray("routes") ?: return@buildSet
-        for (index in 0 until routes.length()) addAll(routes.optJSONObject(index)?.optStringArray("proxy_cidrs").orEmpty())
     }
 
     private fun collectDynamicCoreIps(info: JSONObject): Set<String> = buildSet {

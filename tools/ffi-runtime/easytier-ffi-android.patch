@@ -167,7 +167,7 @@ index ece1e38..839cb32 100644
  }
  
 diff --git a/easytier-contrib/easytier-ffi/src/instance_api.rs b/easytier-contrib/easytier-ffi/src/instance_api.rs
-index 285d0ea..b6ca8d6 100644
+index 9a488ae..a798a3f 100644
 --- a/easytier-contrib/easytier-ffi/src/instance_api.rs
 +++ b/easytier-contrib/easytier-ffi/src/instance_api.rs
 @@ -1,10 +1,13 @@
@@ -185,7 +185,7 @@ index 285d0ea..b6ca8d6 100644
      state::{ffi_context, resolve_instance_id_by_name},
      types::KeyValuePair,
  };
-@@ -57,16 +60,38 @@ pub(crate) unsafe fn parse_config(cfg_str: *const std::ffi::c_char) -> std::ffi:
+@@ -60,16 +63,38 @@ pub(crate) unsafe fn parse_config(cfg_str: *const std::ffi::c_char) -> std::ffi:
  /// # Safety
  /// Run the network instance
  pub(crate) unsafe fn run_network_instance(cfg_str: *const std::ffi::c_char) -> std::ffi::c_int {
@@ -229,7 +229,7 @@ index 285d0ea..b6ca8d6 100644
      };
      let cfg = match TomlConfigLoader::new_from_str(&cfg_str) {
          Ok(cfg) => cfg,
-@@ -76,16 +101,82 @@ pub(crate) unsafe fn run_network_instance(cfg_str: *const std::ffi::c_char) -> s
+@@ -79,16 +104,82 @@ pub(crate) unsafe fn run_network_instance(cfg_str: *const std::ffi::c_char) -> s
          }
      };
  
@@ -317,7 +317,7 @@ index 285d0ea..b6ca8d6 100644
      0
  }
  
-@@ -138,13 +229,17 @@ pub(crate) unsafe fn retain_network_instance(
+@@ -141,13 +232,17 @@ pub(crate) unsafe fn retain_network_instance(
          inst_names
      };
  
@@ -340,7 +340,7 @@ index 285d0ea..b6ca8d6 100644
      }
  
      0
-@@ -170,13 +265,17 @@ pub(crate) unsafe fn delete_network_instance(
+@@ -173,13 +268,17 @@ pub(crate) unsafe fn delete_network_instance(
          return -1;
      };
  
@@ -364,7 +364,7 @@ index 285d0ea..b6ca8d6 100644
  
      0
 diff --git a/easytier-contrib/easytier-ffi/src/lib.rs b/easytier-contrib/easytier-ffi/src/lib.rs
-index 6c332c8..4c155f4 100644
+index 6c332c8..0cf201d 100644
 --- a/easytier-contrib/easytier-ffi/src/lib.rs
 +++ b/easytier-contrib/easytier-ffi/src/lib.rs
 @@ -36,6 +36,8 @@ mod data_plane;
@@ -447,12 +447,39 @@ index 6c332c8..4c155f4 100644
  /// Report whether the managed config-server client is currently connected.
  ///
  /// # Return
+@@ -356,3 +415,26 @@ pub unsafe extern "C" fn get_error_msg(out: *mut *const c_char) {
+ pub extern "C" fn free_string(s: *const c_char) {
+     error::free_string(s)
+ }
++
++// Mobile projection and attachment use the upstream shared NIC transaction.
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn shared_tun_config(out: *mut *const c_char) -> c_int {
++    if out.is_null() || in_config_server_callback() { return -1; }
++    let ctx = state::ffi_context();
++    let config = ctx.runtime.block_on(easytier::instance::factory::get_mobile_tun_config(
++        &ctx.manager, &ctx.manager.instance_ids()));
++    unsafe { *out = std::ffi::CString::new(serde_json::to_string(&config).unwrap()).unwrap().into_raw(); }
++    0
++}
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn attach_shared_tun_fd(fd: c_int) -> c_int {
++    if in_config_server_callback() { return -1; }
++    let ctx = state::ffi_context();
++    match ctx.runtime.block_on(easytier::instance::factory::attach_mobile_tun_fd(&ctx.manager, fd, None)) {
++        Ok(_) => 0,
++        Err(err) => { error::set_error_msg(&err.to_string()); -1 }
++    }
++}
 diff --git a/easytier-contrib/easytier-ffi/src/runtime_configs.rs b/easytier-contrib/easytier-ffi/src/runtime_configs.rs
 new file mode 100644
-index 0000000..bf98fea
+index 0000000..09b1306
 --- /dev/null
 +++ b/easytier-contrib/easytier-ffi/src/runtime_configs.rs
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,263 @@
 +use std::{
 +    collections::{BTreeMap, HashSet},
 +    ffi::{CStr, CString, c_char, c_int},
@@ -553,26 +580,6 @@ index 0000000..bf98fea
 +        .collect()
 +}
 +
-+fn running_tun_ids(source: ConfigSource) -> Result<Vec<Uuid>, String> {
-+    let mut to_disable = Vec::new();
-+    for id in ffi_context().manager.instance_ids() {
-+        let Some(config) = ffi_context().manager.config(id) else {
-+            continue;
-+        };
-+        if config.get_flags().no_tun {
-+            continue;
-+        }
-+        if source == ConfigSource::Web && config.get_network_config_source() != ConfigSource::Web {
-+            return Err(
-+                "Android only supports one active TUN network; user-managed VPN remains active"
-+                    .into(),
-+            );
-+        }
-+        to_disable.push(id);
-+    }
-+    Ok(to_disable)
-+}
-+
 +pub(crate) fn select_preempted_tun_ids(config: &TomlConfigLoader) -> Result<Vec<Uuid>, String> {
 +    let id = config.get_id();
 +    let name = config.get_inst_name();
@@ -584,11 +591,8 @@ index 0000000..bf98fea
 +    {
 +        return Err(format!("instance name {name} already exists"));
 +    }
-+    if config.get_flags().no_tun {
-+        Ok(Vec::new())
-+    } else {
-+        running_tun_ids(config.get_network_config_source())
-+    }
++    // SharedVirtualNic selects disjoint members without stopping other networks.
++    Ok(Vec::new())
 +}
 +
 +// The Web hook already holds ProcessManagement's mutation lock; the local
@@ -1186,10 +1190,10 @@ index c008a66..9eaea0b 100644
  fn list_instance_returns_instance_names_and_ids() {
      let instance_id = Uuid::new_v4();
 diff --git a/easytier-core/src/instance/tests.rs b/easytier-core/src/instance/tests.rs
-index 773993a..5ede4b0 100644
+index b5cf282..c65d775 100644
 --- a/easytier-core/src/instance/tests.rs
 +++ b/easytier-core/src/instance/tests.rs
-@@ -1943,6 +1943,118 @@ virtual_ip = "10.82.0.2/24"
+@@ -2232,6 +2232,118 @@ virtual_ip = "10.82.0.2/24"
          );
      }
  
@@ -1308,7 +1312,7 @@ index 773993a..5ede4b0 100644
      #[cfg(feature = "management")]
      #[tokio::test]
      async fn owned_selection_and_cleanup_share_the_canonical_transaction() {
-@@ -2182,7 +2294,7 @@ virtual_ip = "10.82.0.2/24"
+@@ -2471,7 +2583,7 @@ virtual_ip = "10.82.0.2/24"
              }
          }
  
@@ -1317,7 +1321,7 @@ index 773993a..5ede4b0 100644
  
          #[async_trait]
          impl InstanceMutationHooks for RejectPostRun {
-@@ -2196,6 +2308,14 @@ virtual_ip = "10.82.0.2/24"
+@@ -2485,6 +2597,14 @@ virtual_ip = "10.82.0.2/24"
              ) -> Result<(), String> {
                  Err("rejected for rollback test".to_owned())
              }
@@ -1332,7 +1336,7 @@ index 773993a..5ede4b0 100644
          }
  
          let instances = Arc::new(InstanceManager::new(
-@@ -2221,9 +2341,10 @@ virtual_ip = "10.82.0.2/24"
+@@ -2510,9 +2630,10 @@ virtual_ip = "10.82.0.2/24"
                  ConfigFileControl::new(Some(config_path.clone()), ConfigFilePermission::default()),
              )
              .unwrap();
@@ -1344,7 +1348,7 @@ index 773993a..5ede4b0 100644
              storage.clone(),
          );
  
-@@ -2244,6 +2365,7 @@ virtual_ip = "10.82.0.2/24"
+@@ -2533,6 +2654,7 @@ virtual_ip = "10.82.0.2/24"
              .await;
  
          assert!(result.is_err());
@@ -1433,194 +1437,3 @@ index b1d37d1..44cdc93 100644
      /// Removes caller-owned Instances without applying remote config-file policy.
      pub async fn delete_owned_network_instances(
          &self,
-diff --git a/easytier/src/instance/runtime_host/tun_common.rs b/easytier/src/instance/runtime_host/tun_common.rs
-index a86aead..6efde18 100644
---- a/easytier/src/instance/runtime_host/tun_common.rs
-+++ b/easytier/src/instance/runtime_host/tun_common.rs
-@@ -1,3 +1,5 @@
-+#[cfg(mobile)]
-+use std::os::fd::OwnedFd;
- use std::{
-     any::Any,
-     sync::{Arc, OnceLock},
-@@ -12,6 +14,8 @@ use crate::instance::virtual_nic::NicCtx;
- struct NicCtxContainer {
-     _nic_ctx: Option<Box<dyn Any + Send>>,
-     magic_dns: MagicDnsRuntime,
-+    #[cfg(mobile)]
-+    _tun_fd: Option<OwnedFd>,
- }
- 
- impl NicCtxContainer {
-@@ -19,6 +23,17 @@ impl NicCtxContainer {
-         Self {
-             _nic_ctx: Some(Box::new(nic_ctx)),
-             magic_dns,
-+            #[cfg(mobile)]
-+            _tun_fd: None,
-+        }
-+    }
-+
-+    #[cfg(mobile)]
-+    fn new_mobile(nic_ctx: NicCtx, magic_dns: MagicDnsRuntime, fd: OwnedFd) -> Self {
-+        Self {
-+            _nic_ctx: Some(Box::new(nic_ctx)),
-+            magic_dns,
-+            _tun_fd: Some(fd),
-         }
-     }
- 
-@@ -26,6 +41,8 @@ impl NicCtxContainer {
-         Self {
-             _nic_ctx: Some(Box::new(tasks)),
-             magic_dns: MagicDnsRuntime::default(),
-+            #[cfg(mobile)]
-+            _tun_fd: None,
-         }
-     }
- }
-@@ -61,6 +78,12 @@ impl TunNicState {
-         let mut old = self.nic_ctx.lock().await.take();
-         if let Some(nic) = old.as_mut() {
-             nic.magic_dns.stop().await;
-+            if let Some(ctx) = nic._nic_ctx.take() {
-+                match ctx.downcast::<NicCtx>() {
-+                    Ok(ctx) => ctx.shutdown().await,
-+                    Err(other) => drop(other),
-+                }
-+            }
-         }
-         drop(old);
-     }
-@@ -88,4 +111,18 @@ impl TunNicState {
-             .await
-             .replace(NicCtxContainer::new(nic, magic_dns));
-     }
-+
-+    #[cfg(mobile)]
-+    pub(super) async fn install_mobile(
-+        &self,
-+        nic: NicCtx,
-+        magic_dns: MagicDnsRuntime,
-+        fd: OwnedFd,
-+    ) {
-+        self.stop().await;
-+        self.nic_ctx
-+            .lock()
-+            .await
-+            .replace(NicCtxContainer::new_mobile(nic, magic_dns, fd));
-+    }
- }
-diff --git a/easytier/src/instance/runtime_host/tun_mobile.rs b/easytier/src/instance/runtime_host/tun_mobile.rs
-index 4f45932..cf6ed95 100644
---- a/easytier/src/instance/runtime_host/tun_mobile.rs
-+++ b/easytier/src/instance/runtime_host/tun_mobile.rs
-@@ -1,4 +1,7 @@
--use std::sync::Arc;
-+use std::{
-+    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
-+    sync::Arc,
-+};
- 
- use anyhow::Context as _;
- use cidr::Ipv4Inet;
-@@ -21,8 +24,8 @@ pub(super) struct NativeTunRuntime {
-     global_ctx: ArcGlobalCtx,
-     cancel: CancellationToken,
-     nic: TunNicState,
--    tun_fd: mpsc::Sender<i32>,
--    tun_fd_receiver: Mutex<Option<mpsc::Receiver<i32>>>,
-+    tun_fd: mpsc::Sender<Option<OwnedFd>>,
-+    tun_fd_receiver: Mutex<Option<mpsc::Receiver<Option<OwnedFd>>>>,
-     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
- }
- 
-@@ -50,12 +53,12 @@ impl NativeTunRuntime {
-         nic_state: TunNicState,
-         global_ctx: ArcGlobalCtx,
-         packet_plane: Arc<CorePacketPlane>,
--        fd: i32,
-+        fd: Option<OwnedFd>,
-     ) -> anyhow::Result<()> {
-         nic_state.drain().await;
--        if fd <= 0 {
-+        let Some(fd) = fd else {
-             return Ok(());
--        }
-+        };
-         let closed = Arc::new(Notify::new());
-         let mut nic = NicCtx::new(
-             global_ctx.clone(),
-@@ -63,12 +66,15 @@ impl NativeTunRuntime {
-             nic_state.receiver(),
-             closed,
-         );
--        nic.run_for_mobile(fd).await.context("add ip failed")?;
-+        if let Err(error) = nic.run_for_mobile(fd.as_raw_fd()).await {
-+            nic.shutdown().await;
-+            return Err(error).context("add ip failed");
-+        }
-         let magic_dns = global_ctx
-             .get_ipv4()
-             .map(|ip| MagicDnsRuntime::start(global_ctx, packet_plane, None, ip))
-             .unwrap_or_default();
--        nic_state.install(nic, magic_dns).await;
-+        nic_state.install_mobile(nic, magic_dns, fd).await;
-         Ok(())
-     }
- 
-@@ -109,6 +115,13 @@ impl NativeTunRuntime {
-     }
- 
-     pub(super) fn attach_fd(&self, fd: i32) -> anyhow::Result<()> {
-+        let fd = if fd > 0 {
-+            // The caller may close its Android ParcelFileDescriptor immediately.
-+            // Clone before queueing so delayed install cannot see a reused fd.
-+            Some(unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?)
-+        } else {
-+            None
-+        };
-         self.tun_fd
-             .try_send(fd)
-             .map_err(|error| anyhow::anyhow!("failed to send TUN fd: {error}"))
-@@ -129,6 +142,25 @@ impl NativeTunRuntime {
-     }
- }
- 
-+#[cfg(test)]
-+mod fd_tests {
-+    use std::{
-+        fs::File,
-+        os::fd::{AsRawFd, BorrowedFd, OwnedFd},
-+    };
-+
-+    #[test]
-+    fn queued_fd_survives_original_close() {
-+        let original = File::open("/dev/null").unwrap();
-+        let owned: OwnedFd = unsafe { BorrowedFd::borrow_raw(original.as_raw_fd()) }
-+            .try_clone_to_owned()
-+            .unwrap();
-+        drop(original);
-+        let queued: File = owned.into();
-+        assert!(queued.metadata().is_ok());
-+    }
-+}
-+
- struct NativeDhcpIpv4Host {
-     global_ctx: ArcGlobalCtx,
-     operation: Arc<Mutex<()>>,
-diff --git a/easytier/src/instance/virtual_nic.rs b/easytier/src/instance/virtual_nic.rs
-index 43c97aa..340225c 100644
---- a/easytier/src/instance/virtual_nic.rs
-+++ b/easytier/src/instance/virtual_nic.rs
-@@ -804,6 +804,10 @@ pub struct NicCtx {
- }
- 
- impl NicCtx {
-+    pub(crate) async fn shutdown(mut self) {
-+        self.tasks.shutdown().await;
-+    }
-+
-     pub(crate) fn new(
-         global_ctx: ArcGlobalCtx,
-         packet_plane: Arc<CorePacketPlane>,

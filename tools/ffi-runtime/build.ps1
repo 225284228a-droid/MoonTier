@@ -5,7 +5,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$commit = 'ff3921ce6842f9660d629eafac499498026c6784'
+$commit = '5af90471bfe654d097f7e488a2699f2850db7dd2'
 $toolchain = '1.96.0'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $checkout = Join-Path $PSScriptRoot 'upstream'
@@ -62,13 +62,7 @@ try {
     if ($RunTests) {
         $env:BINDGEN_EXTRA_CLANG_ARGS = $null
         $env:CARGO_PROFILE_DEV_DEBUG = '0'
-        Invoke-VerifiedTest easytier-ffi runtime_configs_ 2
-        Invoke-VerifiedTest easytier-ffi detached_web_instance_is_adopted_on_reconnect_and_removed_by_stop 1
-        Invoke-VerifiedTest easytier-ffi connected_client_stop_removes_web_instance_started_locally 1
-        Invoke-VerifiedTest easytier-ffi restored_web_instance_rejoins_tracking_and_catalog 1
-        Invoke-VerifiedTest easytier-ffi callback_delivers_uuid_and_unregister_drains 1
-        Invoke-VerifiedTest easytier-core owned_preemption_waits_for_remote_mutation_before_selecting 1
-        Invoke-VerifiedTest easytier-core process_management_rpc_rolls_back_instance_and_file_on_hook_failure 1
+        Invoke-VerifiedTest easytier mobile_tun::tests 4
     }
     $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = Join-Path $bin 'aarch64-linux-android24-clang.cmd'
     $env:CC_aarch64_linux_android = $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER

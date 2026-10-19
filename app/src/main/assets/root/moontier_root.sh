@@ -18,13 +18,17 @@ ensure_tun() {
 }
 
 alive() {
-    if [ -f "$PID_FILE" ]; then
-        PID=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    return 1
+    [ -f "$PID_FILE" ] || return 1
+    PID=$(cat "$PID_FILE" 2>/dev/null)
+    case "$PID" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$PID" -gt 1 ] || return 1
+    kill -0 "$PID" 2>/dev/null || return 1
+    # kill -0 also succeeds for zombies and reused PIDs. Only manage our core.
+    STATE=$(awk '{print $3}' "/proc/$PID/stat" 2>/dev/null)
+    [ "$STATE" != Z ] && [ "$STATE" != X ] || return 1
+    [ "$CORE" -ef "/proc/$PID/exe" ] && return 0
+    EXE=$(readlink "/proc/$PID/exe" 2>/dev/null)
+    [ "$EXE" = "$CORE" ] || [ "$EXE" = "$CORE (deleted)" ]
 }
 
 case "$ACTION" in
@@ -50,15 +54,27 @@ case "$ACTION" in
         exit 1
         ;;
     stop)
-        if [ -f "$PID_FILE" ]; then
-            PID=$(cat "$PID_FILE" 2>/dev/null)
-            if [ -n "$PID" ]; then
-                kill "$PID" 2>/dev/null
-                sleep 1
+        if alive; then
+            kill "$PID" 2>/dev/null
+            COUNT=0
+            while alive && [ "$COUNT" -lt 20 ]; do
+                sleep 0.1
+                COUNT=$((COUNT + 1))
+            done
+            if alive; then
                 kill -9 "$PID" 2>/dev/null
+                COUNT=0
+                while alive && [ "$COUNT" -lt 20 ]; do
+                    sleep 0.1
+                    COUNT=$((COUNT + 1))
+                done
             fi
-            rm -f "$PID_FILE"
+            if alive; then
+                echo "core process $PID is still running"
+                exit 1
+            fi
         fi
+        rm -f "$PID_FILE"
         exit 0
         ;;
     status)

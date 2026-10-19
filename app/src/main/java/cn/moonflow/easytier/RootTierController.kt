@@ -44,8 +44,7 @@ class RootTierController(private val context: Context) {
     private var foreground = true
     private var operationGeneration = 0L
     @Volatile private var shutdownGeneration = 0L
-    private var lastRootCidr = ""
-    private var lastRootExitRoute = false
+    private var lastRootPlan = RootRoutingPlan(emptyList())
 
     var state by mutableStateOf(RootTierState())
         private set
@@ -109,9 +108,11 @@ class RootTierController(private val context: Context) {
     }
 
     fun checkCoreUpdate() {
+        if (state.core.checking || state.core.installing) return
+        val channel = store.loadSettings().coreReleaseChannel
         scope.launch {
             state = state.copy(core = state.core.copy(checking = true, message = ""))
-            val latest = withContext(Dispatchers.IO) { coreManager.checkLatest() }
+            val latest = withContext(Dispatchers.IO) { coreManager.checkLatest(channel) }
             state = state.copy(
                 core = state.core.copy(
                     checking = false,
@@ -122,42 +123,22 @@ class RootTierController(private val context: Context) {
         }
     }
 
-    fun installCore() {
-        scope.launch {
-            state = state.copy(core = state.core.copy(installing = true, progress = 0, message = ""))
-            AppDiagnostics.event("root", "official core download requested")
-            try {
-                val tag = withContext(Dispatchers.IO) {
-                    coreManager.installLatest { progress, _ ->
-                        state = state.copy(core = state.core.copy(progress = progress))
-                    }
-                }
-                state = state.copy(
-                    core = RootCoreState(
-                        ready = true,
-                        installedVersion = tag,
-                        latestVersion = tag,
-                        progress = 100,
-                        message = "已安装官方核心 $tag"
-                    )
-                )
-                AppDiagnostics.event("root", "official core installed: $tag")
-            } catch (error: Exception) {
-                AppDiagnostics.error("root", "official core installation failed", error)
-                state = state.copy(
-                    core = state.core.copy(
-                        installing = false,
-                        message = error.message ?: "下载核心失败"
-                    )
-                )
-            }
-        }
+    fun coreChannelChanged() {
+        state = state.copy(core = state.core.copy(latestVersion = "", message = ""))
     }
 
-    fun installCoreZip(uri: Uri) {
+    fun installCore() {
+        val channel = store.loadSettings().coreReleaseChannel
+        installCoreArchive { progress -> coreManager.installLatest(channel, progress) }
+    }
+
+    fun installCoreZip(uri: Uri) = installCoreArchive { progress -> coreManager.installFromZip(uri, progress) }
+
+    private fun installCoreArchive(install: suspend ((Int, Int) -> Unit) -> String) {
+        if (state.core.installing || state.core.checking) return
         scope.launch {
             state = state.copy(core = state.core.copy(installing = true, progress = 0, message = ""))
-            AppDiagnostics.event("root", "local core ZIP import requested")
+            AppDiagnostics.event("root", "core installation requested")
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     managerMutex.withLock {
@@ -166,7 +147,7 @@ class RootTierController(private val context: Context) {
                         val restartManager = managerAlive()
                         if (restartManager) stopManagerBlocking()
                         try {
-                            val version = coreManager.installFromZip(uri) { progress, _ ->
+                            val version = install { progress, _ ->
                                 state = state.copy(core = state.core.copy(progress = progress))
                             }
                             val refreshed = if (restartManager) {
@@ -181,7 +162,7 @@ class RootTierController(private val context: Context) {
                         } catch (error: Exception) {
                             if (restartManager && coreManager.isReady()) {
                                 runCatching { ensureManagerBlocking(options) }
-                                    .onFailure { AppDiagnostics.error("root", "failed to restore manager after ZIP import", it) }
+                                    .onFailure { AppDiagnostics.error("root", "failed to restore manager after core installation", it) }
                             }
                             throw error
                         }
@@ -189,24 +170,24 @@ class RootTierController(private val context: Context) {
                 }
             }
             result.onSuccess { (version, refreshed) ->
-                AppDiagnostics.event("root", "local core ZIP installed")
+                AppDiagnostics.event("root", "core installed")
                 state = state.copy(
                     core = RootCoreState(
                         ready = true,
                         installedVersion = version,
                         latestVersion = state.core.latestVersion,
                         progress = 100,
-                        message = "已导入官方核心"
+                        message = "已安装核心 $version"
                     ),
                     instances = refreshed?.instances ?: state.instances,
                     configServer = refreshed?.configServer ?: state.configServer
                 )
             }.onFailure { error ->
-                AppDiagnostics.error("root", "local core ZIP import failed", error)
+                AppDiagnostics.error("root", "core installation failed", error)
                 state = state.copy(
                     core = state.core.copy(
                         installing = false,
-                        message = error.message ?: "导入核心失败"
+                        message = error.message ?: "安装核心失败"
                     )
                 )
             }
@@ -635,7 +616,12 @@ class RootTierController(private val context: Context) {
     }
 
     private fun stopManagerBlocking() {
-        removeRootRouting()
+        removeRootRouting(force = managerPidFile.exists())
+        val pid = managerPid()
+        if (pid <= 1) {
+            managerPidFile.delete()
+            return
+        }
         val command = buildString {
             append("sh ")
             append(shq(scriptFile.absolutePath))
@@ -646,92 +632,46 @@ class RootTierController(private val context: Context) {
             append(' ')
             append(shq(managerPidFile.absolutePath))
         }
-        val pid = managerPid()
         val result = RootManager.su(command, timeoutMs = 12000)
-        if (!result.success || isAlive(pid)) {
+        if (!result.success) {
             throw IllegalStateException(managerError(result, "共享 manager 停止失败"))
         }
         managerPidFile.delete()
     }
 
     private fun applyRootRouting(snapshot: ManagerSnapshot) {
-        val cidr = snapshotLocalCidr(snapshot)
-        if (cidr.isBlank()) return
-        val settings = store.loadSettings()
-        val exitRouteActive = settings.exitNodeAutoRoutes && hasReachableExitNode(snapshot)
-        if (cidr == lastRootCidr && exitRouteActive == lastRootExitRoute) return
-
+        val plan = rootRoutingPlan(snapshot.instanceIds, snapshot.runningInfo, store.loadConfigs(), store.loadSettings().exitNodeAutoRoutes)
+        if (plan == lastRootPlan) return
+        if (plan.destinations.isEmpty()) { removeRootRouting(); return }
         val command = buildString {
-            append("CIDR=")
-            append(shq(cidr))
-            append('\n')
-            append("IFACE=\$(ip -4 route show table main | awk -v cidr=\"\$CIDR\" '\$1==cidr {for(i=1;i<=NF;i++) if(\$i==\"dev\"){print \$(i+1); exit}}')\n")
-            append("[ -z \"\$IFACE\" ] && IFACE=tun0\n")
-            append("ip rule del pref 20001 2>/dev/null\n")
-            append("ip rule del pref 20002 2>/dev/null\n")
+            append("while ip rule del pref 20001 2>/dev/null; do :; done\n")
+            append("while ip rule del pref 20002 2>/dev/null; do :; done\n")
             append("ip route flush table 200 2>/dev/null\n")
-            append("ip rule add pref 20001 from all to \"\$CIDR\" lookup main\n")
-            if (exitRouteActive) {
-                append("ip route add default dev \"\$IFACE\" table 200 2>/dev/null; ip route replace default dev \"\$IFACE\" table 200 2>/dev/null\n")
-                append("ip rule add pref 20002 from all uidrange 10000-99999 lookup 200 2>/dev/null || true\n")
+            for (cidr in plan.destinations) {
+                append("ip rule add pref 20001 from all to ${shq(cidr)} lookup main || exit 1\n")
+            }
+            if (plan.exitCidr.isNotBlank()) {
+                append("CIDR=${shq(plan.exitCidr)}\n")
+                append("IFACE=\$(ip -4 route show table main | awk -v cidr=\"\$CIDR\" '\$1==cidr {for(i=1;i<=NF;i++) if(\$i==\"dev\"){print \$(i+1); exit}}')\n")
+                append("[ -n \"\$IFACE\" ] || exit 1\n")
+                append("ip route replace default dev \"\$IFACE\" table 200 || exit 1\n")
+                append("ip rule add pref 20002 from all uidrange 10000-99999 lookup 200 || exit 1\n")
             }
             append("true")
         }
         val result = RootManager.su(command, timeoutMs = 10000)
-        if (result.success) {
-            lastRootCidr = cidr
-            lastRootExitRoute = exitRouteActive
-        } else {
-            Log.w(TAG, "Root policy route apply failed: ${result.output}")
-            AppDiagnostics.warn("root", "policy route apply failed: ${result.output.takeLast(1200)}")
-        }
+        if (result.success) lastRootPlan = plan
+        else AppDiagnostics.warn("root", "policy route apply failed: ${result.output.takeLast(1200)}")
     }
 
-    private fun removeRootRouting() {
-        if (lastRootCidr.isBlank() && !lastRootExitRoute) return
+    private fun removeRootRouting(force: Boolean = false) {
+        if (!force && lastRootPlan.destinations.isEmpty()) return
         RootManager.su(
-            "ip rule del pref 20001 2>/dev/null; ip rule del pref 20002 2>/dev/null; ip route flush table 200 2>/dev/null; true",
+            "while ip rule del pref 20001 2>/dev/null; do :; done; while ip rule del pref 20002 2>/dev/null; do :; done; ip route flush table 200 2>/dev/null; true",
             timeoutMs = 6000
         )
-        lastRootCidr = ""
-        lastRootExitRoute = false
+        lastRootPlan = RootRoutingPlan(emptyList())
     }
-
-    private fun snapshotLocalCidr(snapshot: ManagerSnapshot): String {
-        for (id in snapshot.instanceIds) {
-            val info = snapshot.runningInfo.optJSONObject(id) ?: continue
-            val cidr = ipv4Cidr(
-                info.optJSONObjectCompat("my_node_info", "myNodeInfo")
-                    ?.optJSONObjectCompat("virtual_ipv4", "virtualIpv4")
-            )
-            if (cidr.isNotBlank()) return cidr
-        }
-        return ""
-    }
-
-    private fun hasReachableExitNode(snapshot: ManagerSnapshot): Boolean {
-        val routeIps = HashSet<String>()
-        for (id in snapshot.instanceIds) {
-            val info = snapshot.runningInfo.optJSONObject(id) ?: continue
-            val routes = info.optJSONArray("routes") ?: continue
-            for (index in 0 until routes.length()) {
-                val route = routes.optJSONObject(index) ?: continue
-                val addr = route.optJSONObjectCompat("ipv4_addr", "ipv4Addr")
-                    ?.optJSONObject("address")
-                    ?.optLong("addr", 0L) ?: 0L
-                if (addr != 0L) routeIps += Ipv4.intToAddress(addr)
-            }
-        }
-        if (routeIps.isEmpty()) return false
-        return store.loadConfigs().any { config ->
-            config.id in snapshot.instanceIds && config.exitNodes.cleanItems().any { node ->
-                normalizeExitNode(node) in routeIps
-            }
-        }
-    }
-
-    private fun normalizeExitNode(value: String): String =
-        value.trim().substringBefore("/")
 
     private suspend fun pollLoop() {
         while (true) {
@@ -1170,7 +1110,7 @@ class RootTierController(private val context: Context) {
     private fun ensureScript() {
         scriptFile.parentFile?.mkdirs()
         context.assets.open("root/moontier_root.sh").use { input ->
-            scriptFile.outputStream().use { output -> input.copyTo(output) }
+            scriptFile.writeText(input.bufferedReader().readText().replace("\r\n", "\n"))
         }
         scriptFile.setExecutable(true, false)
     }

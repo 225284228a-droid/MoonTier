@@ -50,4 +50,31 @@ class FfiRuntimeSnapshotTest {
         gate.clear()
         assertFalse(gate.accepts("one", changed))
     }
+
+    @Test fun sharedVpnProjectsMultipleNetworksAndStableMembership() {
+        val config = JSONObject("""{"instance_ids":["b","a"],"addresses":["10.2.0.1/24","10.1.0.1/24","2001:db8::1/64"],
+            "routes":["10.2.0.0/24","10.1.0.0/24","2001:db8::/64"],"dns":"100.100.100.101"}""")
+        val request = sharedVpnRequest(config, setOf("1.2.3.4"), 1300, true)
+        val json = JSONObject(request)
+        assertEquals(3, json.getJSONArray("addresses").length())
+        assertTrue(json.getJSONArray("routes").toStringList().contains("0.0.0.0/0"))
+        assertEquals("100.100.100.101", json.getString("dns"))
+        assertEquals(1300, json.getInt("mtu"))
+        config.put("instance_ids", org.json.JSONArray("[\"a\",\"b\"]"))
+        assertEquals(request, sharedVpnRequest(config, setOf("1.2.3.4"), 1300, true))
+        val gate = VpnSessionGate()
+        val token = gate.select("shared-vpn", request)
+        config.put("instance_ids", org.json.JSONArray("[\"a\"]"))
+        gate.select("shared-vpn", sharedVpnRequest(config, emptySet(), 1300, true))
+        assertFalse(gate.accepts("shared-vpn", token))
+    }
+
+    @Test fun replacingInstanceInvalidatesEvenIdenticalRoutesAndMembership() {
+        val gate = VpnSessionGate()
+        val first = gate.select("shared-vpn", "same projection")
+        gate.invalidate()
+        val replacement = gate.select("shared-vpn", "same projection")
+        assertFalse(gate.accepts("shared-vpn", first))
+        assertTrue(gate.accepts("shared-vpn", replacement))
+    }
 }

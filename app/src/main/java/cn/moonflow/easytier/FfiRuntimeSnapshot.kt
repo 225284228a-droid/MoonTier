@@ -50,6 +50,8 @@ internal class VpnSessionGate {
         return generation
     }
 
+    fun invalidate() { generation++ }
+
     fun clear() {
         generation++
         instanceId = ""
@@ -58,4 +60,19 @@ internal class VpnSessionGate {
 
     fun accepts(id: String, token: Long): Boolean =
         id.isNotEmpty() && instanceId == id && generation == token
+}
+
+// The member list participates in the signature even when routes stay equal.
+internal fun sharedVpnRequest(config: JSONObject, directIps: Set<String>, mtu: Int, exitRoutes: Boolean): String {
+    val routes = config.optJSONArray("routes")?.toStringList().orEmpty().toMutableSet()
+    if (exitRoutes) routes += "0.0.0.0/0"
+    return JSONObject()
+        .put("instanceIds", config.optJSONArray("instance_ids")?.toStringList().orEmpty().sorted().toJsonArray())
+        .put("addresses", config.optJSONArray("addresses")?.toStringList().orEmpty().sorted().toJsonArray())
+        .put("routes", routes.sorted().toJsonArray())
+        .put("dns", config.stringValue("dns"))
+        .put("mtu", mtu)
+        .put("directCoreIps", directIps.sorted().take(64).toJsonArray())
+        .put("exitNodeAutoRoutes", exitRoutes)
+        .toString()
 }

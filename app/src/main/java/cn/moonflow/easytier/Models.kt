@@ -228,6 +228,7 @@ data class AppSettings(
     val darkMode: Boolean = false,
     val rootModeEnabled: Boolean = false,
     val coreAutoUpdate: Boolean = false,
+    val coreReleaseChannel: CoreReleaseChannel = CoreReleaseChannel.STABLE,
     val coreLogLevel: String = CoreLogLevel.OFF,
     val configServerUrl: String = "",
     val configServerHostname: String = "",
@@ -242,6 +243,7 @@ data class AppSettings(
         .put("dark_mode", darkMode)
         .put("root_mode_enabled", rootModeEnabled)
         .put("core_auto_update", coreAutoUpdate)
+        .put("core_release_channel", coreReleaseChannel.name)
         .put("core_log_level", CoreLogLevel.normalize(coreLogLevel))
         .put("config_server_url", configServerUrl)
         .put("config_server_hostname", configServerHostname)
@@ -257,6 +259,7 @@ data class AppSettings(
             darkMode = obj.optBoolean("dark_mode", false),
             rootModeEnabled = obj.optBoolean("root_mode_enabled", false),
             coreAutoUpdate = obj.optBoolean("core_auto_update", false),
+            coreReleaseChannel = CoreReleaseChannel.fromValue(obj.optString("core_release_channel")),
             coreLogLevel = CoreLogLevel.normalize(obj.optString("core_log_level", CoreLogLevel.OFF)),
             configServerUrl = obj.optString("config_server_url", ""),
             configServerHostname = obj.optString("config_server_hostname", ""),
@@ -280,7 +283,6 @@ data class RuntimeState(
     val running: Boolean = false,
     val starting: Boolean = false,
     val stopping: Boolean = false,
-    val runningConfigId: String = "",
     val statusText: String = "EasyTier 未运行",
     val localCidr: String = "",
     val nodes: List<NodeInfo> = emptyList(),

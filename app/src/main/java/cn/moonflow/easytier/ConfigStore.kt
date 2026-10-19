@@ -87,8 +87,7 @@ class ConfigStore(private val context: Context) {
         saveConfigs(
             loadConfigs().map {
                 when {
-                    running -> it.copy(isRunning = it.id == id)
-                    it.id == id -> it.copy(isRunning = false)
+                    it.id == id -> it.copy(isRunning = running)
                     else -> it
                 }
             }
@@ -112,6 +111,7 @@ class ConfigStore(private val context: Context) {
             darkMode = settings.darkMode,
             rootModeEnabled = settings.rootModeEnabled,
             coreAutoUpdate = settings.coreAutoUpdate,
+            coreReleaseChannel = settings.coreReleaseChannel,
             coreLogLevel = settings.coreLogLevel,
             configServerUrl = settings.configServerUrl,
             configServerHostname = settings.configServerHostname,
@@ -230,7 +230,6 @@ class ConfigStore(private val context: Context) {
     private fun normalizeConfigs(configs: List<NetworkConfig>): List<NetworkConfig> {
         val source = if (configs.isEmpty()) listOf(NetworkConfig.defaultConfig()) else configs
         val firstDefaultId = source.firstOrNull { it.isDefault }?.id ?: source.first().id
-        val firstRunningId = source.firstOrNull { it.isRunning }?.id
         val usedInstances = HashSet<String>()
 
         return source.mapIndexed { index, config ->
@@ -249,8 +248,7 @@ class ConfigStore(private val context: Context) {
             config.copy(
                 label = label,
                 instanceName = instance,
-                isDefault = config.id == firstDefaultId,
-                isRunning = firstRunningId != null && config.id == firstRunningId
+                isDefault = config.id == firstDefaultId
             )
         }
     }

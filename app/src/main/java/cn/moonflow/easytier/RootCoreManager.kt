@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -30,31 +29,31 @@ class RootCoreManager(private val context: Context) {
     fun installedVersion(): String =
         runCatching { versionFile.readText().trim() }.getOrDefault("")
 
-    fun checkLatest(): String? {
-        val connection = URL("https://api.github.com/repos/EasyTier/EasyTier/releases/latest")
+    private fun fetchRelease(channel: CoreReleaseChannel): CoreRelease {
+        val connection = URL("https://api.github.com/repos/EasyTier/EasyTier/${channel.endpoint}")
             .openConnection() as HttpURLConnection
         connection.connectTimeout = 8000
         connection.readTimeout = 10000
-        connection.requestMethod = "GET"
         connection.setRequestProperty("Accept", "application/vnd.github+json")
         connection.setRequestProperty("User-Agent", "MoonTier")
-        return runCatching {
+        try {
             val body = connection.inputStream.bufferedReader().use { it.readText() }
-            JSONObject(body).optString("tag_name").trim().ifBlank { null }
-        }.getOrNull()
+            return CoreRelease.parse(body, channel)
+        } finally { connection.disconnect() }
     }
 
-    suspend fun installLatest(onProgress: (Int, Int) -> Unit): String =
+    fun checkLatest(channel: CoreReleaseChannel = CoreReleaseChannel.STABLE): String? =
+        runCatching { fetchRelease(channel).version }.getOrNull()
+
+    suspend fun installLatest(channel: CoreReleaseChannel = CoreReleaseChannel.STABLE, onProgress: (Int, Int) -> Unit): String =
         withContext(Dispatchers.IO) {
-            val tag = checkLatest() ?: throw IllegalStateException("无法获取官方最新版本")
-            val zip = File(context.cacheDir, "easytier-core-$tag.zip")
+            val release = fetchRelease(channel)
+            val zip = File.createTempFile("easytier-core-", ".zip", context.cacheDir)
             try {
-                downloadRelease(tag, zip, onProgress)
-                installRelease(zip, tag)
-            } finally {
-                zip.delete()
-            }
-            tag
+                downloadRelease(release.url, zip, onProgress)
+                installRelease(zip, release.version)
+            } finally { zip.delete() }
+            release.version
         }
 
     suspend fun installFromZip(uri: Uri, onProgress: (Int, Int) -> Unit): String =
@@ -82,17 +81,16 @@ class RootCoreManager(private val context: Context) {
     }
 
     private fun downloadRelease(
-        tag: String,
+        url: String,
         target: File,
         onProgress: (Int, Int) -> Unit
     ) {
-        val url = "https://github.com/EasyTier/EasyTier/releases/download/$tag/easytier-linux-aarch64-$tag.zip"
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 10000
         connection.readTimeout = 30000
         connection.instanceFollowRedirects = true
         val total = connection.contentLengthLong
-        connection.inputStream.use { input ->
+        try { connection.inputStream.use { input ->
             FileOutputStream(target).use { output ->
                 val buffer = ByteArray(64 * 1024)
                 var read: Int
@@ -109,6 +107,7 @@ class RootCoreManager(private val context: Context) {
                 }
             }
         }
+        } finally { connection.disconnect() }
     }
 
     private fun extractRelease(zip: File) {

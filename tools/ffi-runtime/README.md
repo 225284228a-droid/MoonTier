@@ -1,54 +1,54 @@
 # Android FFI runtime
 
-`easytier-ffi-android.patch` applies only to EasyTier commit
-`ff3921ce6842f9660d629eafac499498026c6784`. The build uses the committed
-upstream `Cargo.lock` (`--locked`), Rust 1.96.0 with the
-`aarch64-linux-android` target, NDK
-27.2.12479018 API 24 clang and 16 KiB ELF LOAD alignment, and crate default features (`c-abi` and
-`ffi-dataplane`). The isolated source checkout is `tools/ffi-runtime/upstream/`
-and is ignored by Git. The original EasyTier checkout is never modified.
-The patch SHA-256 is
-`0ae19a856cd98a865c1022a5b5c74f89c5655540da92bdc1a998a494d65408a6`;
-the resulting arm64 library SHA-256 is
-`a4952636ac130cd4432fd558989d62ef4aa2338ea356ed03a177a2d843c0ec37`.
+The bundled EasyTier 2.7.0 development runtime is pinned to upstream commit
+`5af90471bfe654d097f7e488a2699f2850db7dd2`, which includes the mobile shared TUN
+implementation. The `v2.7.0` release tag predates that implementation.
+`easytier-ffi-android.patch` applies only to this commit. Builds use upstream
+`Cargo.lock` (`--locked`), Rust 1.96.0, the `aarch64-linux-android` target,
+NDK 27.2.12479018 API 24 clang, default `c-abi` / `ffi-dataplane` features,
+and 16 KiB ELF LOAD alignment. The isolated checkout is ignored by Git.
 
 ```powershell
-.\tools\ffi-runtime\build.ps1 -SourceRepo C:\path\to\easytier -RunTests
+.\tools\ffi-runtime\build.ps1 -SourceRepo C:\path\to\easytier
 ```
 
-The build copies `libeasytier_ffi.so` into the Android app's arm64 JNI library
-directory and prints the patch and library SHA-256 hashes. Use a source repository
-containing the exact commit above. `-RunTests` runs focused host tests before the
-Android build; the verified filters cover eight host tests across the FFI and
-core crates. A full suite is `cargo +1.96.0 test --locked -j 2 -p easytier-ffi --lib
--- --test-threads=1` from the patched checkout.
+The source repository must contain the pinned commit. The build copies
+`libeasytier_ffi.so` into the app's arm64 JNI library directory and prints
+SHA-256 hashes. Optional `-RunTests` runs the four upstream mobile TUN selection
+unit tests before the Android build. It does not run the full upstream suite.
 
 ## C ABI additions
 
+- `shared_tun_config(const char **out_json)`: projects all running TUN instances
+  through upstream `get_mobile_tun_config`. JSON includes accepted `instance_ids`,
+  IPv4/IPv6 `addresses`, `routes`, `dns`, and per-instance `rejected` errors.
+  Free the output with `free_string`.
+- `attach_shared_tun_fd(int fd)`: synchronously attaches accepted members through
+  upstream `attach_mobile_tun_fd`. The shared dispatcher opens the descriptor
+  once. A nonpositive descriptor detaches all members. The caller owns the fd
+  and must keep it open until synchronous detach completes. Android serializes
+  attach/detach and ignores cleanup from an obsolete VPN generation.
 - `run_network_instance_with_source(const char *toml, int source)`: `0=user`,
-  `1=web`. Existing `run_network_instance` is equivalent to user source.
-- `set_network_instance_enabled(const char *uuid, bool enabled)`: disabling
-  stops the instance but preserves its configuration for later reenable.
-- `collect_runtime_configs(const char **out_json)`: caller frees the allocated
-  output with `free_string`. JSON array objects contain `instance_id`,
-  `instance_name`, `source` (`user` or `web`), `toml_config`, `enabled`, `no_tun`.
-- `restore_runtime_configs(const char *json)`: restores a snapshot only into
-  an empty runtime; disabled entries remain registered without starting.
-- `detach_config_server_client_preserve_instances()`: disconnects and drains
-  callbacks without deleting Web-owned instances. A reconnect adopts those
-  running Web instances; `stop_config_server_client()` retains delete semantics.
+  `1=web`. Starting a network never preempts other networks. Shared TUN conflicts
+  are reported per member; unaffected networks stay enabled.
+- `set_network_instance_enabled(const char *uuid, bool enabled)`: stop an
+  instance while retaining its configuration, or reenable it independently.
+- `collect_runtime_configs(const char **out_json)` and
+  `restore_runtime_configs(const char *json)`: persist/restore local and Web
+  identities, TOML, sources, enabled states, and no-TUN flags. Restoration requires
+  an empty runtime. TOML contains secrets; persist only in private app storage.
+- `detach_config_server_client_preserve_instances()`: disconnect the client and
+  drain callbacks while preserving Web instances for reconnect. The separate
+  `stop_config_server_client()` retains its delete semantics.
+- `set_runtime_event_callback(callback, user_data)`: independent wake events for
+  address, proxy route, peer, and instance changes. Null unregisters and drains.
+  Callbacks only schedule Android work; never call FFI synchronously within them.
 
-The TOML snapshot contains network secrets. Android persistence must use private
-app storage and avoid logging this JSON. No FFI call may be made synchronously
-inside the config-server callback. Web TUN starts preempt other Web TUNs and
-reject an active User TUN; User TUN starts preempt all TUNs. `no_tun` starts do
-not preempt. Preempted configurations remain disabled in the snapshot. Callback
-events include `instance_id` and `disable_network_instance` for Web preemption.
-Android's TUN adapter duplicates the caller's fd synchronously on `set_tun_fd`;
-the caller retains and may close its own fd after success. The queued duplicate
-is RAII-owned and closed after the NIC's I/O tasks have stopped.
-`set_runtime_event_callback(callback, user_data)` listens independently of the
-Web client, emitting JSON `dhcp_ip_changed`, `proxy_cidrs_updated`,
-`peer_connections_changed`, `instance_exited`, and `event_lagged` wake events
-with `instance_id`; null
-unregisters and drains delivery.
+The patch also retains the existing source catalog, callback lifecycle, and
+management rollback integration. Shared NIC packet dispatch, address ownership,
+route conflict selection, and mobile attachment transactions come from upstream.
+
+## Bundled build hashes
+
+- Library SHA-256: `c3c247b96c9eb58285e05da9098d7eae0656e2580bc158f61ff9cea8be076559`.
+- Patch SHA-256: `ab684bf4687c4201032e67a183e4d7057d1b264f3087e49d4e77ca20f06206c4`.

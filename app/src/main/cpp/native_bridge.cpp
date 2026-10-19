@@ -19,6 +19,8 @@ int run_network_instance(const char *cfg_str);
 int retain_network_instance(const char **inst_names, size_t length);
 int collect_network_infos(KeyValuePair *infos, size_t max_length);
 int set_tun_fd(const char *inst_name, int fd);
+int shared_tun_config(const char **out);
+int attach_shared_tun_fd(int fd);
 int run_network_instance_with_source(const char *cfg, int source);
 int set_network_instance_enabled(const char *instance_id, bool enabled);
 int collect_runtime_configs(const char **out_json);
@@ -409,4 +411,22 @@ Java_cn_moonflow_easytier_NativeEasyTier_getLastError(JNIEnv *env, jclass)
     jstring out = env->NewStringUTF(error);
     free_string(error);
     return out;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_cn_moonflow_easytier_NativeEasyTier_sharedTunConfig(JNIEnv *env, jclass)
+{
+    std::lock_guard<std::mutex> lock(ffiMutex);
+    const char *json = nullptr;
+    if (checked(env, shared_tun_config(&json)) < 0) return nullptr;
+    jstring result = toJString(env, json ? json : "{}");
+    if (json) free_string(json);
+    return result;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_cn_moonflow_easytier_NativeEasyTier_attachSharedTunFd(JNIEnv *env, jclass, jint fd)
+{
+    std::lock_guard<std::mutex> lock(ffiMutex);
+    return checked(env, attach_shared_tun_fd(fd));
 }

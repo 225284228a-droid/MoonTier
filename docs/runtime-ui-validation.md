@@ -1,79 +1,64 @@
 # Runtime and UI validation
 
-Verified on 2026-09-30.
+Validation date: 2026-10-20.
 
 ## Sources
 
-- FFI / official Android baseline: EasyTier
-  `ff3921ce6842f9660d629eafac499498026c6784`, plus
-  `tools/ffi-runtime/easytier-ffi-android.patch`.
-- Root manager client: EasyTier `v2.6.4`, resolved by the committed
-  `tools/root-manager-client/Cargo.lock`. Runtime core versions remain independent.
-- Root helper installation version: `2`.
+- Bundled Android FFI: EasyTier `5af90471bfe654d097f7e488a2699f2850db7dd2`
+  (2.7.0 development line with shared mobile TUN), plus the committed
+  `tools/ffi-runtime/easytier-ffi-android.patch`. Recipe: `tools/ffi-runtime/README.md`.
+- Root control helper remains built against the v2.6.4 RPC schema. Downloaded
+  Root cores are independent of the bundled FFI and can use stable, prerelease,
+  or nightly upstream assets.
 
-## Automated checks
+## Focused automated checks
 
-- Kotlin unit tests: 12 passed. Cases cover typed JSON null/error handling,
-  connection selection by peer ID and default connection, absent/closed samples,
-  rounding, real high RTT, a 1000 ms route estimate with a 12 ms connection RTT,
-  disconnect/reconnect, independent FFI settings, retained Web configuration,
-  and invalidation of old TUN requests after network/route changes.
-- Root helper: `cargo zigbuild --target aarch64-unknown-linux-musl --release
-  --offline -j 2` passed. ELF64 AArch64, statically linked (no INTERP segment).
-  Bundled SHA-256:
-  `c7d6424b3dcfb97249f89ccd5c19b55e50593dbeb366b569fb5aee39a026086c`.
-- Android `testDebugUnitTest lintDebug` passed with frozen Kotlin sources:
-  12 tests, zero failures; lint zero errors and nine warnings (dependency
-  updates, compatibility/resource recommendations, hardware ID use, and the
-  application-context controller singleton).
-- Android arm64 FFI release build, JNI/CMake build, and final `assembleDebug`
-  passed. FFI source library SHA-256:
-  `a4952636ac130cd4432fd558989d62ef4aa2338ea356ed03a177a2d843c0ec37`.
-  Source patch SHA-256:
-  `0ae19a856cd98a865c1022a5b5c74f89c5655540da92bdc1a998a494d65408a6`.
-- `zipalign -c -P 16 4` passed on `app/build/outputs/apk/debug/app-debug.apk`.
-  All LOAD segments of all three packaged arm64 libraries are 16 KiB aligned.
-  Dependencies are Android platform libraries or the bundled FFI library.
-- APK entry SHA-256 values match the Root helper asset and all three stripped
-  native build outputs. Packaged FFI SHA-256 (after Android symbol stripping):
-  `95aecbf7eacb9ad3e7103200fac1a7f038a1b78c7fde4e734921267852f80e4b`.
-- Rust host tests: 8 passed. Six FFI cases cover saved/disabled configurations,
-  the real `get_config` RPC request, detach/reconnect, full stop after a local
-  Web-instance start, rollback tracking, and callback delivery/unregistration.
-  Two core TestHost cases cover concurrent local/remote mutation ordering and
-  rollback restoration hooks. Test filters are checked for the expected counts.
-  Final host-test corrections are confined to `cfg(test)`; production Rust
-  sources did not change after the verified arm64 build.
+- `gradle testDebugUnitTest`: 19 tests, zero failures. New coverage verifies
+  multiple IPv4/IPv6 addresses, combined routes/DNS/MTU, stable member ordering,
+  invalidation after member changes and same-UUID instance replacement,
+  release-channel selection, nightly asset
+  names differing from the tag, build timestamps, settings persistence, and
+  missing architecture assets. A Root routing case verifies all active subnets,
+  removal of stopped/no-TUN members, and exit-node reachability within its owner.
+  Existing runtime and node-parser cases pass.
+- `bash tools/test-root-lifecycle.sh`: six cases pass: stale PID, zombie,
+  reused PID, graceful shutdown, forced shutdown, and a process that refuses
+  to exit. The last case must return failure and retain the PID file.
+- The Android shell asset is forced to LF in Git and normalized when installed.
+  Shutdown checks process identity and waits before permitting a mode change;
+  a zombie no longer causes the app's previous extra `kill -0` check to fail.
+- Shared TUN member selection, subnet conflicts, and packet dispatch use the
+  upstream implementation. The patch exposes its mobile projection and
+  synchronous attachment functions to JNI and removes local/Web preemption.
+  Optional build-script host tests are limited to upstream's four mobile TUN
+  selection cases. Neither those optional host tests nor the full Rust suite
+  were run during this change.
 
-## Device acceptance not executed
+- Android arm64 FFI release build completed and all ELF LOAD segments passed
+  the build recipe's 16 KiB alignment check. Source library SHA-256:
+  `c3c247b96c9eb58285e05da9098d7eae0656e2580bc158f61ff9cea8be076559`.
 
-`adb devices -l` returned no devices. The following checks require an Android
-device and were not claimed as passing:
+- Final `gradle testDebugUnitTest assembleDebug --offline` passed, including
+  JNI/CMake linking and APK packaging. The APK contains the rebuilt FFI library
+  and the LF-normalized Root shell asset.
 
-1. In light/dark themes and portrait/landscape, open both ordinary selectors and
-   the Root current-configuration selector. Check long names, selection/running
-   markers, dismissal, stable surrounding layout, and fold/page transitions.
-2. Run automatic and manual official-server synchronization. Check immediate
-   rotation/loading text, repeated taps, success count, failure reason, retained
-   previous list, and successful retry.
-3. Connect FFI using a username and a full URL. Test remote create/update/delete,
-   local TUN priority, remote TUN replacement, and concurrent no-TUN instances.
-4. Clear and save the FFI server field. Verify that running instances remain;
-   reconnect and restart the app, verifying UUID, Web source, enabled state, and
-   cached disabled configurations. Also restart with all instances disabled and
-   the server field empty: cached Web configurations must remain available to
-   enable. Root settings must remain independent.
-5. Cancel VPN authorization, explicitly retry it, recreate the Activity, revoke
-   VPN permission, and change routes/DNS/IP while attaching. Old service intents
-   or cleanup must never replace/close a newer TUN.
-6. Switch Root/FFI modes while starting, stopping, polling, and connecting to a
-   configuration server, including rapid switching back. Verify old-mode service
-   shutdown before target-mode operation.
-7. Compare against the pinned official Android client and another official
-   platform client. Record the first native positive `stats.latency_us` sample,
-   its first visible value, and each direct/relay route transition. Before a
-   sample, expect pending measurement; real 500/1000 ms RTT must remain visible.
+## Device acceptance still required
 
-The display intentionally uses connection RTT, not `path_latency`. End-to-end
-RTT/display timing, Android lifecycle behavior, and visual quality remain device
-acceptance items even when unit tests and builds pass.
+`adb devices` returned no connected devices. No real-device UI or network
+acceptance is claimed. The main follow-up cases are:
+
+1. Start two local configurations on disjoint subnets and a Web configuration.
+   Verify one Android VPN interface contains all accepted addresses/routes,
+   and each configuration has independent nodes and start/stop controls.
+2. Introduce an overlapping subnet. Verify the conflict appears on that member
+   and existing members stay enabled. Stop/restart one accepted member while
+   traffic flows on another. Repeat with IPv6 and shared DNS.
+3. Cancel and retry VPN permission; recreate/revoke the VPN service and change
+   DHCP addresses/routes while attachment is in flight. Obsolete requests and
+   cleanup must not replace or detach the newer shared VPN.
+4. Switch Root to VPN and back with live networks, a stale PID, and a stopped
+   core. Confirm the old backend exits before target-mode operations.
+5. In Settings, choose each core source, check/download a core, and import a
+   local ZIP. Confirm a running Root manager restarts after replacement.
+6. Inspect configuration selectors, independent cards, long names, and theme
+   changes on an Android device.
