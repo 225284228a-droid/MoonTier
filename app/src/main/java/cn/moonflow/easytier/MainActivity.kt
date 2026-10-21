@@ -1,4 +1,4 @@
-﻿package cn.moonflow.easytier
+package cn.moonflow.easytier
 
 import android.app.Activity
 import android.content.Intent
@@ -52,6 +52,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -62,6 +63,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
@@ -100,6 +103,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -111,6 +115,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -368,7 +373,6 @@ private fun MoonTierApp(
     bindImportHandler: (((NetworkConfig) -> Unit, (String, String) -> Unit) -> Unit)
 ) {
     var settings by remember { mutableStateOf(store.loadSettings()) }
-    var nodesExpanded by remember { mutableStateOf(false) }
     var configs by remember { mutableStateOf(store.loadConfigs()) }
     var userServers by remember { mutableStateOf(store.loadUserServers()) }
     var officialServers by remember { mutableStateOf(store.loadOfficialServers()) }
@@ -468,8 +472,8 @@ private fun MoonTierApp(
         }
     }
 
-    LaunchedEffect(isForeground, nodesExpanded) {
-        controller.updatePollingConditions(isForeground, nodesExpanded)
+    LaunchedEffect(isForeground) {
+        controller.updatePollingConditions(isForeground)
         rootController.updatePollingConditions(isForeground)
     }
 
@@ -480,7 +484,12 @@ private fun MoonTierApp(
     LaunchedEffect(Unit) {
         bindImportHandler(
             { cfg ->
-                store.saveConfig(cfg.copy(id = java.util.UUID.randomUUID().toString(), isDefault = configs.isEmpty()))
+                store.saveConfig(
+                    NetworkInput.normalizeConfig(cfg).copy(
+                        id = java.util.UUID.randomUUID().toString(),
+                        isDefault = configs.isEmpty()
+                    )
+                )
                 reloadAll()
                 dialog = "导入完成" to "TOML 配置已加入配置文件列表"
             },
@@ -522,6 +531,20 @@ private fun MoonTierApp(
             !rootController.state.configServer.starting
         ) {
             rootController.startConfigServer(settings)
+        }
+    }
+
+    LaunchedEffect(
+        settings.rootModeEnabled,
+        settings.ffiConfigServerAutoConnect,
+        settings.ffiConfigServerUrl
+    ) {
+        if (
+            !settings.rootModeEnabled &&
+            settings.ffiConfigServerAutoConnect &&
+            settings.ffiConfigServerUrl.isNotBlank()
+        ) {
+            controller.configureConfigServer(settings.ffiConfigServerUrl)
         }
     }
 
@@ -575,8 +598,6 @@ private fun MoonTierApp(
                 } else {
                     MainTabs(
                         palette = palette,
-                        nodesExpanded = nodesExpanded,
-                        onNodesExpandedChange = { nodesExpanded = it },
                         selectedTab = selectedTab,
                         onTab = { selectedTab = it },
                         configs = configs,
@@ -646,15 +667,21 @@ private fun MoonTierApp(
                             }
                         },
                         onConnectConfigServer = {
-                            if (!isFullConfigServerUrl(settings.configServerUrl)) {
-                                dialog = "配置服务器" to "请填写完整配置服务器 URL，例如 udp://host:22020/admin"
+                            if (settings.rootModeEnabled) {
+                                if (!isFullConfigServerUrl(settings.configServerUrl)) {
+                                    dialog = "配置服务器" to "请填写完整配置服务器 URL，例如 udp://host:22020/admin"
+                                } else {
+                                    rootController.startConfigServer(settings)
+                                }
+                            } else if (settings.ffiConfigServerUrl.isBlank()) {
+                                dialog = "配置服务器" to "请填写配置服务器地址"
                             } else {
-                                rootController.startConfigServer(settings)
+                                controller.configureConfigServer(settings.ffiConfigServerUrl)
                             }
                         },
-                        onDisconnectConfigServer = { rootController.stopConfigServer() },
-                        onSaveFfiConfigServer = { url ->
-                            controller.configureConfigServer(url)
+                        onDisconnectConfigServer = {
+                            if (settings.rootModeEnabled) rootController.stopConfigServer()
+                            else controller.disconnectConfigServer()
                         },
                         onImportCoreZip = importCoreZip,
                         onExportDiagnostics = {
@@ -713,8 +740,6 @@ private fun ApplySystemBars(palette: Palette, darkMode: Boolean) {
 @Composable
 private fun MainTabs(
     palette: Palette,
-    nodesExpanded: Boolean,
-    onNodesExpandedChange: (Boolean) -> Unit,
     selectedTab: Int,
     onTab: (Int) -> Unit,
     configs: List<NetworkConfig>,
@@ -751,7 +776,6 @@ private fun MainTabs(
     onDownloadUsers: (String) -> Unit,
     onConnectConfigServer: () -> Unit,
     onDisconnectConfigServer: () -> Unit,
-    onSaveFfiConfigServer: (String) -> Unit,
     onImportCoreZip: () -> Unit,
     onExportDiagnostics: () -> Unit
 ) {
@@ -793,7 +817,7 @@ private fun MainTabs(
                 label = "tab"
             ) { index ->
                 when (index) {
-                    0 -> NetworkPage(palette, configs, runtime, ffiInstances, ffiConfigServer, vpnPermissionRequired, nodesExpanded, onNodesExpandedChange, onStart, onRequestVpnAuthorization, onSetFfiInstanceEnabled, onEdit, rootController, rootAvailable, rootMode, rootSelectedConfigId, onRootConfigSelected)
+                    0 -> NetworkPage(palette, configs, runtime, ffiInstances, ffiConfigServer, vpnPermissionRequired, onStart, onRequestVpnAuthorization, onSetFfiInstanceEnabled, onEdit, rootController, rootAvailable, rootMode, rootSelectedConfigId, onRootConfigSelected)
                     1 -> ProfilesPage(palette, configs, ffiInstances, rootController, rootAvailable, rootMode, onStart, onSetFfiInstanceEnabled, onEdit, onNewConfig, onImportToml, onDeleteConfig, onDefaultConfig, onExportConfig)
                     2 -> ServersPage(
                         palette = palette,
@@ -806,7 +830,6 @@ private fun MainTabs(
                         onSettings = onSettings,
                         onConnectConfigServer = onConnectConfigServer,
                         onDisconnectConfigServer = onDisconnectConfigServer,
-                        onSaveFfiConfigServer = onSaveFfiConfigServer,
                         onSaveUserServers = onSaveUserServers,
                         onAddOfficialServer = onAddOfficialServer,
                         onDownloadUsers = onDownloadUsers,
@@ -841,8 +864,6 @@ private fun NetworkPage(
     ffiInstances: List<FfiInstanceState>,
     ffiConfigServer: RootConfigServerState,
     vpnPermissionRequired: Boolean,
-    nodesExpanded: Boolean,
-    onNodesExpandedChange: (Boolean) -> Unit,
     onStart: (NetworkConfig) -> Unit,
     onRequestVpnAuthorization: () -> Unit,
     onSetFfiInstanceEnabled: (String, Boolean) -> Unit,
@@ -854,10 +875,13 @@ private fun NetworkPage(
     onRootConfigSelected: (String) -> Unit
 ) {
     val rootState = rootController.state
+    val current = configs.firstOrNull { it.id == rootSelectedConfigId }
+        ?: configs.firstOrNull { it.isDefault } ?: configs.firstOrNull()
     val sessions = if (rootMode) {
         rootState.instances.map {
+            val config = configs.firstOrNull { cfg -> cfg.id == it.configId }
             NetworkSession(it.configId, it.displayName, it.running || it.starting || it.stopping, it.running, it.localCidr,
-                it.nodes, it.logs, it.error, noTun = configs.firstOrNull { cfg -> cfg.id == it.configId }?.noTun == true,
+                it.nodes, it.logs, it.error, noTun = config?.noTun == true,
                 starting = it.starting, stopping = it.stopping)
         } + rootState.configServer.managedNetworks.map {
             NetworkSession(it.instanceId, it.instanceName, it.running, it.running, it.localCidr,
@@ -865,10 +889,13 @@ private fun NetworkPage(
         }
     } else ffiInstances.map {
         NetworkSession(it.instanceId, it.displayName, it.enabled, it.running, it.localCidr,
-            it.nodes, error = it.error, remote = it.source == "web", noTun = it.noTun, activeVpn = it.activeVpn)
+            it.nodes,
+            logs = if (it.instanceId == current?.id) runtime.logs else emptyList(),
+            error = it.error,
+            remote = it.source == "web",
+            noTun = it.noTun,
+            activeVpn = it.activeVpn)
     }
-    val current = configs.firstOrNull { it.id == rootSelectedConfigId }
-        ?: configs.firstOrNull { it.isDefault } ?: configs.firstOrNull()
     val selected = sessions.firstOrNull { it.id == current?.id }
     val server = if (rootMode) rootState.configServer else ffiConfigServer
     val canStart = !rootMode || (rootAvailable && rootState.core.ready)
@@ -943,23 +970,11 @@ private fun NetworkPage(
                 }
             }
         }
-        if (rootMode) {
-            items(sessions.filter { it.enabled || it.remote || it.error.isNotBlank() || it.id == current?.id }, key = { it.id }) { session ->
-                SessionCard(palette, session, rootMode = true, canStart = canStart,
-                    showToggle = !session.remote, onToggle = { setEnabled(session, !session.enabled) })
+        // Both runtimes use the selected profile as the single UI entry point.
+        selected?.takeIf { it.enabled || it.error.isNotBlank() }?.let { session ->
+            item(key = "session-${session.id}") {
+                SessionCard(palette, session)
             }
-        } else {
-            // VPN mode is driven by the profile selector above: the Android VPN
-            // is one shared interface, so only the selected profile is shown.
-            selected?.takeIf { it.enabled || it.error.isNotBlank() }?.let { session ->
-                item(key = "vpn-${session.id}") {
-                    SessionCard(palette, session, rootMode = false, canStart = true,
-                        showToggle = false, onToggle = {})
-                }
-            }
-        }
-        if (!rootMode && runtime.logs.isNotEmpty()) {
-            item { LogSection(palette, runtime.logs, nodesExpanded, onNodesExpandedChange) }
         }
     }
 }
@@ -967,28 +982,14 @@ private fun NetworkPage(
 @Composable
 private fun SessionCard(
     palette: Palette,
-    session: NetworkSession,
-    rootMode: Boolean,
-    canStart: Boolean,
-    showToggle: Boolean,
-    onToggle: () -> Unit
+    session: NetworkSession
 ) {
     QCard(palette) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatusDot(if (session.running) palette.success else if (session.error.isNotBlank()) palette.error else palette.subText)
-            Column(Modifier.weight(1f)) {
-                Text(session.name, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Text("${if (session.remote) "服务器下发" else "本地配置"} · ${if (session.noTun) "无 TUN" else if (rootMode) "Root TUN" else "VPN"}",
-                    color = palette.subText, fontSize = 12.sp)
-            }
-            if (showToggle) {
-                QButton(if (session.enabled) "停止" else "启用", palette, Modifier.width(78.dp), compact = true,
-                    primary = !session.enabled, dangerText = session.enabled,
-                    enabled = !session.starting && !session.stopping && (session.enabled || canStart),
-                    onClick = onToggle)
-            }
-        }
-        Spacer(Modifier.height(8.dp))
+        val statusColor = if (session.running) palette.success else if (session.error.isNotBlank()) palette.error else palette.subText
+        var expanded by remember(session.id) { mutableStateOf(false) }
+        val sessionLabel = session.name.ifBlank { "未命名配置" }
+        NodeList(palette, session.nodes, expanded, statusColor, sessionLabel) { expanded = it }
+        Spacer(Modifier.height(6.dp))
         Text(when {
             session.error.isNotBlank() -> session.error
             session.starting -> "正在启动"
@@ -998,13 +999,9 @@ private fun SessionCard(
             session.enabled -> "等待网络地址"
             else -> "已停用"
         }, color = if (session.error.isNotBlank()) palette.error else palette.subText, fontSize = 12.sp)
-        if (session.enabled || session.nodes.isNotEmpty()) {
-            var expanded by remember(session.id) { mutableStateOf(false) }
-            NodeList(palette, session.nodes, expanded) { expanded = it }
-        }
         if (session.logs.isNotEmpty()) {
-            var expanded by remember(session.id) { mutableStateOf(false) }
-            LogSection(palette, session.logs, expanded) { expanded = it }
+            var logsExpanded by remember(session.id) { mutableStateOf(false) }
+            LogSection(palette, session.logs, logsExpanded) { logsExpanded = it }
         }
     }
 }
@@ -1039,11 +1036,11 @@ private fun RootConfigSelect(
             PopupSelectOption(
                 value = config.id,
                 label = config.displayName,
-                subtitle = config.networkName.ifBlank { "未填写网络名称" },
                 running = config.id in runningIds
             )
         },
         palette = palette,
+        height = 44.dp,
         onValue = onSelected
     )
 }
@@ -1053,18 +1050,22 @@ private fun NodeList(
     palette: Palette,
     nodes: List<NodeInfo>,
     expanded: Boolean,
+    statusColor: Color,
+    statusLabel: String,
     onExpandedChange: (Boolean) -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
+            .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        StatusDot(statusColor)
+        Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Text("设备列表", color = palette.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                if (nodes.isEmpty()) "等待节点信息" else "${nodes.size} 个设备",
+                if (nodes.isEmpty()) "$statusLabel · 等待节点信息" else "$statusLabel · ${nodes.size} 个设备",
                 color = palette.subText,
                 fontSize = 12.sp
             )
@@ -1272,7 +1273,6 @@ private fun ServersPage(
     onSettings: (AppSettings) -> Unit,
     onConnectConfigServer: () -> Unit,
     onDisconnectConfigServer: () -> Unit,
-    onSaveFfiConfigServer: (String) -> Unit,
     onSaveUserServers: (List<ServerEntry>) -> Unit,
     onAddOfficialServer: (ServerEntry) -> Unit,
     onDownloadUsers: (String) -> Unit,
@@ -1285,12 +1285,12 @@ private fun ServersPage(
     var officialOpen by remember { mutableStateOf(false) }
     var consoleOpen by remember { mutableStateOf(false) }
     var consoleLogsOpen by remember { mutableStateOf(false) }
-    var ffiDraft by remember { mutableStateOf(settings.ffiConfigServerUrl) }
     var source by remember { mutableStateOf("") }
-
-    LaunchedEffect(settings.ffiConfigServerUrl) {
-        ffiDraft = settings.ffiConfigServerUrl
-    }
+    val serverUrl = if (rootMode) settings.configServerUrl else settings.ffiConfigServerUrl
+    val hostname = if (rootMode) settings.configServerHostname else settings.ffiConfigServerHostname
+    val machineId = if (rootMode) settings.configServerMachineId else settings.ffiConfigServerMachineId
+    val secureMode = if (rootMode) settings.configServerSecureMode else settings.ffiConfigServerSecureMode
+    val autoConnect = if (rootMode) settings.configServerAutoConnect else settings.ffiConfigServerAutoConnect
 
     LazyColumn(
         modifier = Modifier
@@ -1347,56 +1347,55 @@ private fun ServersPage(
                         exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(180))
                     ) {
                         Column(Modifier.padding(top = 10.dp)) {
-                            if (rootMode) {
-                                FieldBlock("完整配置服务器 URL", palette) {
-                                    QTextField(
-                                        value = settings.configServerUrl,
-                                        placeholder = "udp://host:22020/admin",
-                                        palette = palette,
-                                        onValueChange = { onSettings(settings.copy(configServerUrl = it)) }
-                                    )
-                                }
-                                FieldBlock("主机名", palette) {
-                                    QTextField(
-                                        value = settings.configServerHostname,
-                                        placeholder = "留空时使用设备名",
-                                        palette = palette,
-                                        onValueChange = { onSettings(settings.copy(configServerHostname = it)) }
-                                    )
-                                }
-                                FieldBlock("机器 ID", palette) {
-                                    QTextField(
-                                        value = settings.configServerMachineId,
-                                        placeholder = "留空时使用 Android 设备 ID",
-                                        palette = palette,
-                                        onValueChange = { onSettings(settings.copy(configServerMachineId = it)) }
-                                    )
-                                }
-                                SwitchRow("配置服务器加密（Secure Mode）", settings.configServerSecureMode, palette) {
-                                    onSettings(settings.copy(configServerSecureMode = it))
-                                }
-                                SwitchRow("启动时自动连接", settings.configServerAutoConnect, palette) {
-                                    onSettings(settings.copy(configServerAutoConnect = it))
-                                }
-                            } else {
-                                FieldBlock("配置服务器地址", palette) {
-                                    QTextField(
-                                        value = ffiDraft,
-                                        placeholder = "用户名或 udp://host:22020/username",
-                                        palette = palette,
-                                        onValueChange = { ffiDraft = it }
-                                    )
-                                }
-                                Spacer(Modifier.height(10.dp))
-                                QButton(
-                                    text = "保存",
+                            FieldBlock(if (rootMode) "完整配置服务器 URL" else "配置服务器地址", palette) {
+                                QTextField(
+                                    value = serverUrl,
+                                    placeholder = if (rootMode) "udp://host:22020/admin" else "用户名或 udp://host:22020/username",
                                     palette = palette,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    icon = Icons.Rounded.Check,
-                                    enabled = !configServer.starting && !configServer.stopping &&
-                                        (ffiDraft.trim() != configServer.serverUrl.trim() ||
-                                            (ffiDraft.isNotBlank() && !configServer.running)),
-                                    onClick = { onSaveFfiConfigServer(ffiDraft.trim()) }
+                                    onValueChange = { value ->
+                                        onSettings(
+                                            if (rootMode) settings.copy(configServerUrl = value)
+                                            else settings.copy(ffiConfigServerUrl = value)
+                                        )
+                                    }
+                                )
+                            }
+                            FieldBlock("主机名", palette) {
+                                QTextField(
+                                    value = hostname,
+                                    placeholder = "留空时使用设备名",
+                                    palette = palette,
+                                    onValueChange = { value ->
+                                        onSettings(
+                                            if (rootMode) settings.copy(configServerHostname = value)
+                                            else settings.copy(ffiConfigServerHostname = value)
+                                        )
+                                    }
+                                )
+                            }
+                            FieldBlock("机器 ID", palette) {
+                                QTextField(
+                                    value = machineId,
+                                    placeholder = if (rootMode) "留空时使用 Android 设备 ID" else "留空时使用 FFI 设备 ID",
+                                    palette = palette,
+                                    onValueChange = { value ->
+                                        onSettings(
+                                            if (rootMode) settings.copy(configServerMachineId = value)
+                                            else settings.copy(ffiConfigServerMachineId = value)
+                                        )
+                                    }
+                                )
+                            }
+                            SwitchRow("配置服务器加密（Secure Mode）", secureMode, palette) {
+                                onSettings(
+                                    if (rootMode) settings.copy(configServerSecureMode = it)
+                                    else settings.copy(ffiConfigServerSecureMode = it)
+                                )
+                            }
+                            SwitchRow("启动时自动连接", autoConnect, palette) {
+                                onSettings(
+                                    if (rootMode) settings.copy(configServerAutoConnect = it)
+                                    else settings.copy(ffiConfigServerAutoConnect = it)
                                 )
                             }
                             if (configServer.error.isNotBlank()) {
@@ -1435,26 +1434,27 @@ private fun ServersPage(
                                     }
                                 }
                             }
-                            if (rootMode) {
-                                Spacer(Modifier.height(10.dp))
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    QButton(
-                                        text = if (configServer.starting) "启动中" else "连接",
-                                        palette = palette,
-                                        modifier = Modifier.weight(1f),
-                                        enabled = rootAvailable && !configServer.running && !configServer.starting && !configServer.stopping && isFullConfigServerUrl(settings.configServerUrl),
-                                        onClick = onConnectConfigServer
-                                    )
-                                    QButton(
-                                        text = if (configServer.stopping) "断开中" else "断开",
-                                        palette = palette,
-                                        modifier = Modifier.weight(1f),
-                                        primary = false,
-                                        dangerText = true,
-                                        enabled = configServer.running || configServer.starting,
-                                        onClick = onDisconnectConfigServer
-                                    )
-                                }
+                            Spacer(Modifier.height(10.dp))
+                            val urlReady = if (rootMode) isFullConfigServerUrl(serverUrl) else serverUrl.isNotBlank()
+                            val modeAvailable = !rootMode || rootAvailable
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                QButton(
+                                    text = if (configServer.starting) "连接中" else "连接",
+                                    palette = palette,
+                                    modifier = Modifier.weight(1f),
+                                    enabled = modeAvailable && urlReady &&
+                                        !configServer.running && !configServer.starting && !configServer.stopping,
+                                    onClick = onConnectConfigServer
+                                )
+                                QButton(
+                                    text = if (configServer.stopping) "断开中" else "断开",
+                                    palette = palette,
+                                    modifier = Modifier.weight(1f),
+                                    primary = false,
+                                    dangerText = true,
+                                    enabled = configServer.running || configServer.starting,
+                                    onClick = onDisconnectConfigServer
+                                )
                             }
                             if (configServer.logs.isNotEmpty()) {
                                 Spacer(Modifier.height(8.dp))
@@ -1966,8 +1966,8 @@ private fun ConfigEditorScreenV2(
     onExport: (NetworkConfig) -> Unit
 ) {
     var cfg by remember(initial.id) { mutableStateOf(initial) }
-    val editorScope = rememberCoroutineScope()
-    var validating by remember { mutableStateOf(false) }
+    val validation = remember(cfg) { NetworkConfigValidation.validate(cfg) }
+    val focusManager = LocalFocusManager.current
     var rawTomlOpen by remember { mutableStateOf(false) }
     var rawTomlText by remember(initial.id) { mutableStateOf(TomlCodec.build(initial)) }
     var rawTomlDirty by remember(initial.id) { mutableStateOf(false) }
@@ -1979,8 +1979,10 @@ private fun ConfigEditorScreenV2(
     var perfOpen by remember { mutableStateOf(false) }
     var serviceOpen by remember { mutableStateOf(false) }
     var aclOpen by remember { mutableStateOf(false) }
-    var addressOpen by remember { mutableStateOf(true) }
+    var addressOpen by remember { mutableStateOf(false) }
     var gatewayOpen by remember { mutableStateOf(false) }
+    var securityOpen by remember { mutableStateOf(false) }
+    var confirmClearSecurity by remember { mutableStateOf(false) }
     var serverPicker by remember { mutableStateOf<ServerPickerState?>(null) }
 
     fun updateAdvanced(transform: (AdvancedNetworkConfig) -> AdvancedNetworkConfig) {
@@ -2000,21 +2002,8 @@ private fun ConfigEditorScreenV2(
     }
 
     fun useCurrentConfig(action: (NetworkConfig) -> Unit) {
-        if (validating) return
         val target = (if (rawTomlDirty) parseRawTomlForEditor() else cfg) ?: return
-        validating = true
-        editorScope.launch {
-            val result = withContext(Dispatchers.Default) {
-                runCatching { NativeEasyTier.parseConfig(TomlCodec.build(target)) }
-            }
-            validating = false
-            result.onSuccess {
-                rawTomlDirty = false
-                action(target)
-            }.onFailure {
-                editorError = "配置无效" to (it.message ?: "请检查地址、密钥及数值设置。")
-            }
-        }
+        action(NetworkInput.normalizeConfig(target))
     }
 
     fun saveCurrentConfig() { useCurrentConfig(onSave) }
@@ -2034,6 +2023,9 @@ private fun ConfigEditorScreenV2(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { focusManager.clearFocus() })
+            }
             .padding(horizontal = 16.dp),
         contentPadding = PaddingValues(top = 14.dp, bottom = 180.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -2043,12 +2035,24 @@ private fun ConfigEditorScreenV2(
                 Text("编辑配置", color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(12.dp))
                 SmallLabel("配置名称", palette)
-                QTextField(cfg.label, "配置名称", palette) { cfg = cfg.copy(label = it) }
+                QTextField(cfg.label, "配置名称", palette, error = validation.error(ConfigField.LABEL) != null) { cfg = cfg.copy(label = it) }
+                validation.error(ConfigField.LABEL)?.let {
+                    Text(it, color = palette.error, fontSize = 11.sp)
+                }
                 Spacer(Modifier.height(16.dp))
                 ActionBar(palette) {
-                    QButton("保存", palette, Modifier.weight(1f), compact = true, enabled = !validating, icon = Icons.Rounded.Check) { saveCurrentConfig() }
+                    QButton("保存", palette, Modifier.weight(1f), compact = true, icon = Icons.Rounded.Check) { saveCurrentConfig() }
                     QButton("不保存", palette, Modifier.weight(1f), primary = false, compact = true) { onBack() }
-                    QButton("导出", palette, Modifier.weight(1f), primary = false, compact = true, enabled = !validating) { exportCurrentConfig() }
+                    QButton("导出", palette, Modifier.weight(1f), primary = false, compact = true) { exportCurrentConfig() }
+                }
+                if (!validation.isValid) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "${validation.errorCount} 项配置不兼容，仍可保存；建议运行前按红色提示修正",
+                        color = palette.error,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp
+                    )
                 }
             }
         }
@@ -2059,8 +2063,17 @@ private fun ConfigEditorScreenV2(
                 FieldBlock("主机名", palette) {
                     QTextField(cfg.hostname, "留空时使用系统设备名", palette) { cfg = cfg.copy(hostname = it) }
                 }
-                FieldBlock("网络名称", palette) {
-                    QTextField(cfg.networkName, "请输入网络名称", palette) { cfg = cfg.copy(networkName = it) }
+                FieldBlock(
+                    "组网名称",
+                    palette,
+                    validation.error(ConfigField.NETWORK_NAME)
+                ) {
+                    QTextField(
+                        cfg.networkName,
+                        "请输入组网名称",
+                        palette,
+                        error = validation.error(ConfigField.NETWORK_NAME) != null
+                    ) { cfg = cfg.copy(networkName = it) }
                 }
                 FieldBlock("密码", palette) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2076,24 +2089,71 @@ private fun ConfigEditorScreenV2(
                         }
                     }
                 }
-                SwitchRow("安全模式", cfg.advanced.secureMode, palette) { value -> updateAdvanced { it.copy(secureMode = value) } }
-                if (cfg.advanced.secureMode) {
-                    Text("使用密钥认证节点。密码留空时通过凭据加入网络；密钥留空由核心生成。", color = palette.subText, fontSize = 12.sp, lineHeight = 18.sp)
-                    FieldBlock("节点私钥 / 访问凭据", palette) {
-                        QTextField(cfg.advanced.privateKey, "Base64 私钥或管理员发放的凭据", palette, password = true) { value -> updateAdvanced { it.copy(privateKey = value) } }
+                SwitchRow(
+                    "安全模式",
+                    cfg.advanced.secureMode,
+                    palette,
+                    error = validation.error(ConfigField.SECURE_KEYS)
+                ) { value ->
+                    val hasSecurityData = cfg.advanced.privateKey.isNotBlank() ||
+                        cfg.advanced.publicKey.isNotBlank() ||
+                        cfg.advanced.managedCredentials.isNotEmpty() ||
+                        cfg.advanced.peerKeys.values.any { it.isNotBlank() }
+                    if (!value && hasSecurityData) {
+                        confirmClearSecurity = true
+                    } else {
+                        updateAdvanced { it.copy(secureMode = value) }
                     }
-                    FieldBlock("节点公钥", palette) {
-                        QTextField(cfg.advanced.publicKey, "留空时从私钥推导", palette) { value -> updateAdvanced { it.copy(publicKey = value) } }
-                    }
-                    cfg.peerUrls.forEach { uri ->
-                        FieldBlock("服务器公钥 · $uri", palette) {
-                            QTextField(cfg.advanced.peerKeys[uri].orEmpty(), "可选，用于校验对端身份", palette) { value -> updateAdvanced { it.copy(peerKeys = it.peerKeys + (uri to value)) } }
-                        }
-                    }
-                    ManagedCredentialsEditor(cfg.advanced.managedCredentials, palette) { value -> updateAdvanced { it.copy(managedCredentials = value) } }
                 }
                 SwitchRow("低延迟优先", cfg.latencyFirst, palette) { cfg = cfg.copy(latencyFirst = it) }
                 SwitchRow("私有模式", cfg.enablePrivateMode, palette) { cfg = cfg.copy(enablePrivateMode = it) }
+            }
+        }
+
+        if (cfg.advanced.secureMode) {
+            item {
+                ExpandableQCard("安全模式", securityOpen, { securityOpen = it }, palette) {
+                    Text("使用密钥认证节点。密码留空时通过凭据加入网络；密钥留空由核心生成。", color = palette.subText, fontSize = 12.sp, lineHeight = 18.sp)
+                    FieldBlock("节点私钥 / 访问凭据", palette, validation.error(ConfigField.SECURE_KEYS)) {
+                        QTextField(
+                            cfg.advanced.privateKey,
+                            "Base64 私钥或管理员发放的凭据",
+                            palette,
+                            password = true,
+                            error = validation.error(ConfigField.SECURE_KEYS) != null
+                        ) { value ->
+                            updateAdvanced { it.copy(privateKey = value) }
+                        }
+                    }
+                    FieldBlock("节点公钥", palette, validation.error(ConfigField.SECURE_KEYS)) {
+                        QTextField(
+                            cfg.advanced.publicKey,
+                            "留空时从私钥推导",
+                            palette,
+                            error = validation.error(ConfigField.SECURE_KEYS) != null
+                        ) { value ->
+                            updateAdvanced { it.copy(publicKey = value) }
+                        }
+                    }
+                    cfg.peerUrls.forEach { uri ->
+                        FieldBlock("服务器公钥 · $uri", palette, validation.error(ConfigField.PEER_KEYS)) {
+                            QTextField(
+                                cfg.advanced.peerKeys[uri].orEmpty(),
+                                "可选，用于校验对端身份",
+                                palette,
+                                error = validation.error(ConfigField.PEER_KEYS) != null
+                            ) { value ->
+                                updateAdvanced { it.copy(peerKeys = it.peerKeys + (uri to value)) }
+                            }
+                        }
+                    }
+                    validation.error(ConfigField.MANAGED_CREDENTIALS)?.let {
+                        Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
+                    }
+                    ManagedCredentialsEditor(cfg.advanced.managedCredentials, palette) { value ->
+                        updateAdvanced { it.copy(managedCredentials = value) }
+                    }
+                }
             }
         }
 
@@ -2101,32 +2161,81 @@ private fun ConfigEditorScreenV2(
             ExpandableQCard("地址分配", addressOpen, { addressOpen = it }, palette) {
                 SwitchRow("IPv4 DHCP 自动分配", cfg.dhcp, palette) { cfg = cfg.copy(dhcp = it) }
                 if (cfg.dhcp) {
-                    FieldBlock("IPv4 DHCP 地址段", palette) {
-                        QTextField(cfg.advanced.dhcpCidr, "留空自动选择，例如 10.126.126.0/24", palette) { value -> updateAdvanced { it.copy(dhcpCidr = value) } }
+                    FieldBlock("IPv4 DHCP 网段", palette, validation.error(ConfigField.DHCP_CIDR)) {
+                        QTextField(
+                            cfg.advanced.dhcpCidr,
+                            "留空自动选择，例如 10.126.126.0/24",
+                            palette,
+                            error = validation.error(ConfigField.DHCP_CIDR) != null,
+                            onFocusLost = {
+                                val normalized = NetworkInput.normalizeCidr(cfg.advanced.dhcpCidr, 24, networkAddress = true)
+                                if (normalized != cfg.advanced.dhcpCidr) updateAdvanced { it.copy(dhcpCidr = normalized) }
+                            }
+                        ) { value -> updateAdvanced { it.copy(dhcpCidr = value) } }
                     }
                 } else {
-                    FieldBlock("虚拟 IPv4 地址", palette) {
-                        QTextField(cfg.ipv4, "例如 10.126.126.2/24", palette) { cfg = cfg.copy(ipv4 = it) }
+                    FieldBlock("虚拟 IPv4 地址", palette, validation.error(ConfigField.IPV4)) {
+                        QTextField(
+                            cfg.ipv4,
+                            "例如 10.126.126.2/24",
+                            palette,
+                            error = validation.error(ConfigField.IPV4) != null,
+                            onFocusLost = {
+                                val normalized = NetworkInput.normalizeCidr(cfg.ipv4, 24)
+                                if (normalized != cfg.ipv4) cfg = cfg.copy(ipv4 = normalized)
+                            }
+                        ) { cfg = cfg.copy(ipv4 = it) }
                     }
                 }
                 SwitchRow("启用 IPv6 连接", !cfg.disableIpv6, palette) { cfg = cfg.copy(disableIpv6 = !it) }
-                Text("IPv6 连接控制底层传输；虚拟 IPv6 地址单独配置。", color = palette.subText, fontSize = 12.sp)
-                SwitchRow("IPv6 DHCP 自动分配", cfg.advanced.dhcpv6, palette) { value -> updateAdvanced { it.copy(dhcpv6 = value) } }
-                if (cfg.advanced.dhcpv6) {
-                    FieldBlock("IPv6 DHCP 地址段", palette) {
-                        QTextField(cfg.advanced.dhcpv6Cidr, "留空自动选择，例如 fd12:3456::/64", palette) { value -> updateAdvanced { it.copy(dhcpv6Cidr = value) } }
-                    }
+                if (cfg.disableIpv6) {
+                    Text("IPv6 已关闭，IPv6 地址与公网前缀不会写入配置。", color = palette.subText, fontSize = 12.sp)
                 } else {
-                    FieldBlock("虚拟 IPv6 地址", palette) {
-                        QTextField(cfg.advanced.ipv6, "例如 fd12:3456::2/64", palette) { value -> updateAdvanced { it.copy(ipv6 = value) } }
+                    Text("IPv6 连接控制底层传输；虚拟 IPv6 地址单独配置。", color = palette.subText, fontSize = 12.sp)
+                    SwitchRow("IPv6 DHCP 自动分配", cfg.advanced.dhcpv6, palette) { value -> updateAdvanced { it.copy(dhcpv6 = value) } }
+                    if (cfg.advanced.dhcpv6) {
+                        FieldBlock("IPv6 DHCP 网段", palette, validation.error(ConfigField.DHCPV6_CIDR)) {
+                            QTextField(
+                                cfg.advanced.dhcpv6Cidr,
+                                "留空自动选择，例如 fd12:3456::/64",
+                                palette,
+                                error = validation.error(ConfigField.DHCPV6_CIDR) != null,
+                                onFocusLost = {
+                                    val normalized = NetworkInput.normalizeCidr(cfg.advanced.dhcpv6Cidr, 64, networkAddress = true)
+                                    if (normalized != cfg.advanced.dhcpv6Cidr) updateAdvanced { it.copy(dhcpv6Cidr = normalized) }
+                                }
+                            ) { value -> updateAdvanced { it.copy(dhcpv6Cidr = value) } }
+                        }
+                    } else {
+                        FieldBlock("虚拟 IPv6 地址", palette, validation.error(ConfigField.IPV6)) {
+                            QTextField(
+                                cfg.advanced.ipv6,
+                                "例如 fd12:3456::2/64",
+                                palette,
+                                error = validation.error(ConfigField.IPV6) != null,
+                                onFocusLost = {
+                                    val normalized = NetworkInput.normalizeCidr(cfg.advanced.ipv6, 64)
+                                    if (normalized != cfg.advanced.ipv6) updateAdvanced { it.copy(ipv6 = normalized) }
+                                }
+                            ) { value -> updateAdvanced { it.copy(ipv6 = value) } }
+                        }
                     }
-                }
-                SwitchRow("自动获取公网 IPv6 地址", cfg.advanced.ipv6PublicAddrAuto, palette) { value -> updateAdvanced { it.copy(ipv6PublicAddrAuto = value) } }
-                SwitchRow("提供公网 IPv6 前缀", cfg.advanced.ipv6PublicAddrProvider, palette) { value -> updateAdvanced { it.copy(ipv6PublicAddrProvider = value) } }
-                if (cfg.advanced.ipv6PublicAddrProvider) {
-                    Text("前缀分发需要系统接口支持，在 Root 模式下使用。", color = palette.subText, fontSize = 12.sp)
-                    FieldBlock("公网 IPv6 前缀", palette) {
-                        QTextField(cfg.advanced.ipv6PublicAddrPrefix, "留空自动检测，例如 2001:db8:1234::/64", palette) { value -> updateAdvanced { it.copy(ipv6PublicAddrPrefix = value) } }
+                    SwitchRow("自动获取公网 IPv6 地址", cfg.advanced.ipv6PublicAddrAuto, palette) { value -> updateAdvanced { it.copy(ipv6PublicAddrAuto = value) } }
+                    SwitchRow("提供公网 IPv6 前缀", cfg.advanced.ipv6PublicAddrProvider, palette) { value -> updateAdvanced { it.copy(ipv6PublicAddrProvider = value) } }
+                    if (cfg.advanced.ipv6PublicAddrProvider) {
+                        Text("前缀分发需要系统接口支持，在 Root 模式下使用。", color = palette.subText, fontSize = 12.sp)
+                        FieldBlock("公网 IPv6 前缀", palette, validation.error(ConfigField.IPV6_PREFIX)) {
+                            QTextField(
+                                cfg.advanced.ipv6PublicAddrPrefix,
+                                "留空自动检测，例如 2001:db8:1234::/64",
+                                palette,
+                                error = validation.error(ConfigField.IPV6_PREFIX) != null,
+                                onFocusLost = {
+                                    val normalized = NetworkInput.normalizeCidr(cfg.advanced.ipv6PublicAddrPrefix, 64, networkAddress = true)
+                                    if (normalized != cfg.advanced.ipv6PublicAddrPrefix) updateAdvanced { it.copy(ipv6PublicAddrPrefix = normalized) }
+                                }
+                            ) { value -> updateAdvanced { it.copy(ipv6PublicAddrPrefix = value) } }
+                        }
                     }
                 }
             }
@@ -2140,6 +2249,9 @@ private fun ConfigEditorScreenV2(
                     palette = palette
                 ) {
                     cfg = cfg.copy(peerUrls = it)
+                }
+                validation.error(ConfigField.PEER_URLS)?.let {
+                    Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
                 }
                 Row(
                     Modifier
@@ -2174,8 +2286,12 @@ private fun ConfigEditorScreenV2(
                 FieldBlock("数据压缩", palette) {
                     QSelect(cfg.advanced.dataCompressAlgo, listOf("none", "zstd"), palette) { value -> updateAdvanced { it.copy(dataCompressAlgo = value) } }
                 }
-                FieldBlock("默认加密协议", palette) {
-                    QSelect(cfg.encryptionAlgorithm, listOf("aes-gcm", "aes-256-gcm", "chacha20", "xor"), palette) { cfg = cfg.copy(encryptionAlgorithm = it) }
+                if (cfg.enableEncryption) {
+                    FieldBlock("默认加密协议", palette) {
+                        QSelect(cfg.encryptionAlgorithm, listOf("aes-gcm", "aes-256-gcm", "chacha20", "xor"), palette) { cfg = cfg.copy(encryptionAlgorithm = it) }
+                    }
+                } else {
+                    Text("加密已关闭，默认加密协议不会写入配置。", color = palette.subText, fontSize = 12.sp)
                 }
             }
         }
@@ -2199,13 +2315,22 @@ private fun ConfigEditorScreenV2(
                 ListEditor("UDP STUN 服务器", cfg.stunServers, "stun.example.com:3478", palette) { cfg = cfg.copy(stunServers = it) }
                 ListEditor("TCP STUN 服务器", cfg.advanced.tcpStunServers, "stun.example.com:3478", palette) { value -> updateAdvanced { it.copy(tcpStunServers = value) } }
                 ListEditor("IPv6 STUN 服务器", cfg.advanced.stunServersV6, "[2001:db8::1]:3478", palette) { value -> updateAdvanced { it.copy(stunServersV6 = value) } }
+                validation.error(ConfigField.STUN_SERVERS)?.let {
+                    Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
+                }
             }
         }
 
         item {
             ExpandableQCard("网络服务", serviceOpen, { serviceOpen = it }, palette) {
                 SwitchRow("启用出口节点", cfg.enableExitNode, palette) { cfg = cfg.copy(enableExitNode = it) }
-                SwitchRow("系统转发", cfg.proxyForwardBySystem, palette) { cfg = cfg.copy(proxyForwardBySystem = it) }
+                SwitchRow(
+                    "系统转发",
+                    cfg.proxyForwardBySystem,
+                    palette,
+                    enabled = !cfg.noTun,
+                    error = validation.error(ConfigField.SYSTEM_FORWARD)
+                ) { cfg = cfg.copy(proxyForwardBySystem = it) }
                 SwitchRow("启用魔法 DNS", cfg.enableMagicDns, palette) { cfg = cfg.copy(enableMagicDns = it) }
                 if (cfg.enableMagicDns) {
                     FieldBlock("魔法 DNS 域名后缀", palette) {
@@ -2228,15 +2353,27 @@ private fun ConfigEditorScreenV2(
                 ListEditor("监听地址", cfg.listenerUrls, "tcp://0.0.0.0:11010", palette) {
                     cfg = cfg.copy(listenerUrls = it)
                 }
+                validation.error(ConfigField.LISTENERS)?.let {
+                    Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
+                }
                 ProxyNetworksEditor(cfg.proxyCidrs, cfg.advanced.proxyMappings, palette) { cidrs, mappings ->
                     cfg = cfg.copy(proxyCidrs = cidrs, advanced = cfg.advanced.copy(proxyMappings = mappings))
                 }
+                validation.error(ConfigField.PROXY_CIDRS)?.let {
+                    Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
+                }
                 Text("自定义进入 VPN 的路由，将禁用子网代理等自动传播的路由", color = palette.subText, fontSize = 12.sp)
-                ListEditor("自定义路由规则", cfg.routes, "10.0.0.0/8", palette) {
+                ListEditor("自定义路由规则", cfg.routes, "10.0.0.0/8", palette, normalizeItem = NetworkInput::normalizeCidrList) {
                     cfg = cfg.copy(routes = it, enableManualRoutes = it.isNotEmpty())
+                }
+                validation.error(ConfigField.ROUTES)?.let {
+                    Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
                 }
                 ListEditor("出口节点列表", cfg.exitNodes, "10.126.126.1", palette) {
                     cfg = cfg.copy(exitNodes = it)
+                }
+                validation.error(ConfigField.EXIT_NODES)?.let {
+                    Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
                 }
             }
         }
@@ -2246,6 +2383,9 @@ private fun ConfigEditorScreenV2(
                     QTextField(cfg.advanced.socks5Proxy, "例如 socks5://127.0.0.1:1080", palette) { value -> updateAdvanced { it.copy(socks5Proxy = value) } }
                 }
                 PortForwardsEditor(cfg.advanced.portForwards, palette) { value -> updateAdvanced { it.copy(portForwards = value) } }
+                validation.error(ConfigField.PORT_FORWARDS)?.let {
+                    Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
+                }
                 SwitchRow("启用 WireGuard 接入", cfg.advanced.enableVpnPortal, palette) { value -> updateAdvanced { it.copy(enableVpnPortal = value) } }
                 if (cfg.advanced.enableVpnPortal) {
                     FieldBlock("WireGuard 监听地址", palette) {
@@ -2255,6 +2395,9 @@ private fun ConfigEditorScreenV2(
                         QTextField(cfg.advanced.vpnPortalPrivateKey, "留空自动生成", palette, password = true) { value -> updateAdvanced { it.copy(vpnPortalPrivateKey = value) } }
                     }
                     VpnPortalClientsEditor(cfg.advanced.vpnPortalClients, palette) { value -> updateAdvanced { it.copy(vpnPortalClients = value) } }
+                    validation.error(ConfigField.VPN_PORTAL)?.let {
+                        Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
+                    }
                 }
             }
         }
@@ -2279,12 +2422,20 @@ private fun ConfigEditorScreenV2(
                     QTextField(cfg.advanced.socketMark, "可选，十进制整数", palette) { value -> updateAdvanced { it.copy(socketMark = value) } }
                 }
                 SwitchRow("使用用户态协议栈", cfg.useSmoltcp, palette) { cfg = cfg.copy(useSmoltcp = it) }
-                SwitchRow("无 TUN 模式", cfg.noTun, palette) { cfg = cfg.copy(noTun = it) }
+                SwitchRow("无 TUN 模式", cfg.noTun, palette) { enabled ->
+                    cfg = cfg.copy(
+                        noTun = enabled,
+                        proxyForwardBySystem = if (enabled) false else cfg.proxyForwardBySystem
+                    )
+                }
                 FieldBlock("MTU 值", palette) {
                     QTextField(if (cfg.mtu > 0) cfg.mtu.toString() else "", "最大 1380，留空使用默认", palette) {
                         val mtu = it.trim().toIntOrNull()?.coerceIn(0, 1380) ?: 0
                         cfg = cfg.copy(mtu = mtu)
                     }
+                }
+                validation.error(ConfigField.NUMERIC)?.let {
+                    Text(it, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
                 }
             }
         }
@@ -2358,6 +2509,39 @@ private fun ConfigEditorScreenV2(
         )
     }
 
+    if (confirmClearSecurity) {
+        AlertDialog(
+            onDismissRequest = { confirmClearSecurity = false },
+            title = { Text("关闭安全模式", color = palette.text, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "关闭安全模式会同时清除已填写的节点私钥、节点公钥、服务器公钥和受管凭据。是否继续？",
+                    color = palette.subText,
+                    lineHeight = 20.sp
+                )
+            },
+            confirmButton = {
+                QButton("关闭并清除", palette, compact = true, danger = true) {
+                    updateAdvanced {
+                        it.copy(
+                            secureMode = false,
+                            privateKey = "",
+                            publicKey = "",
+                            managedCredentials = emptyList(),
+                            peerKeys = emptyMap()
+                        )
+                    }
+                    confirmClearSecurity = false
+                }
+            },
+            dismissButton = {
+                QButton("取消", palette, primary = false, compact = true) { confirmClearSecurity = false }
+            },
+            containerColor = palette.surface,
+            shape = RoundedCornerShape(22.dp)
+        )
+    }
+
     editorError?.let { (title, body) ->
         AlertDialog(
             onDismissRequest = { editorError = null },
@@ -2406,8 +2590,28 @@ private fun ProxyNetworksEditor(cidrs: List<String>, mappings: List<ProxyMapping
     ConfigRulesEditor("子网代理", entries, { ProxyMapping() }, palette, { updated ->
         onValues(updated.map { it.cidr }, updated.filter { it.mappedCidr.isNotBlank() || it.allow != null })
     }) { rule, edit ->
-        FieldBlock("代理网段", palette) { QTextField(rule.cidr, "192.168.1.0/24", palette) { edit(rule.copy(cidr = it)) } }
-        FieldBlock("映射网段", palette) { QTextField(rule.mappedCidr, "可选，例如 10.168.1.0/24", palette) { edit(rule.copy(mappedCidr = it)) } }
+        FieldBlock("代理网段", palette) {
+            QTextField(
+                rule.cidr,
+                "192.168.1.0/24",
+                palette,
+                onFocusLost = {
+                    val normalized = NetworkInput.normalizeCidr(rule.cidr, 24, networkAddress = true)
+                    if (normalized != rule.cidr) edit(rule.copy(cidr = normalized))
+                }
+            ) { edit(rule.copy(cidr = it)) }
+        }
+        FieldBlock("映射网段", palette) {
+            QTextField(
+                rule.mappedCidr,
+                "可选，例如 10.168.1.0/24",
+                palette,
+                onFocusLost = {
+                    val normalized = NetworkInput.normalizeCidr(rule.mappedCidr, 24, networkAddress = true)
+                    if (normalized != rule.mappedCidr) edit(rule.copy(mappedCidr = normalized))
+                }
+            ) { edit(rule.copy(mappedCidr = it)) }
+        }
         SwitchRow("限制访问来源组", rule.allow != null, palette) { edit(rule.copy(allow = if (it) emptyList() else null)) }
         rule.allow?.let { groups ->
             ListEditor("允许访问的组", groups, "组名；空列表拒绝所有组", palette) { edit(rule.copy(allow = it)) }
@@ -2428,7 +2632,17 @@ private fun PortForwardsEditor(values: List<PortForwardRule>, palette: Palette, 
 private fun VpnPortalClientsEditor(values: List<VpnPortalClient>, palette: Palette, onValues: (List<VpnPortalClient>) -> Unit) {
     ConfigRulesEditor("接入客户端", values, { VpnPortalClient() }, palette, onValues) { client, edit ->
         FieldBlock("名称", palette) { QTextField(client.name, "客户端名称", palette) { edit(client.copy(name = it)) } }
-        FieldBlock("虚拟地址", palette) { QTextField(client.virtualIp, "10.126.126.10/24", palette) { edit(client.copy(virtualIp = it)) } }
+        FieldBlock("虚拟地址", palette) {
+            QTextField(
+                client.virtualIp,
+                "10.126.126.10/24",
+                palette,
+                onFocusLost = {
+                    val normalized = NetworkInput.normalizeCidr(client.virtualIp, 24)
+                    if (normalized != client.virtualIp) edit(client.copy(virtualIp = normalized))
+                }
+            ) { edit(client.copy(virtualIp = it)) }
+        }
         ListEditor("所属组", client.groups, "组名", palette) { edit(client.copy(groups = it)) }
     }
 }
@@ -2442,7 +2656,7 @@ private fun ManagedCredentialsEditor(values: List<ManagedCredential>, palette: P
         SwitchRow("允许中继", rule.allowRelay, palette) { edit(rule.copy(allowRelay = it)) }
         SwitchRow("可重复使用", rule.reusable, palette) { edit(rule.copy(reusable = it)) }
         FieldBlock("过期时间", palette) { QTextField(rule.expiryUnix, "Unix 秒，0 表示不过期", palette) { edit(rule.copy(expiryUnix = it)) } }
-        ListEditor("允许代理网段", rule.allowedProxyCidrs, "192.168.1.0/24", palette) { edit(rule.copy(allowedProxyCidrs = it)) }
+        ListEditor("允许代理网段", rule.allowedProxyCidrs, "192.168.1.0/24", palette, normalizeItem = NetworkInput::normalizeCidrList) { edit(rule.copy(allowedProxyCidrs = it)) }
     }
 }
 
@@ -2540,15 +2754,23 @@ private fun SmallLabel(text: String, palette: Palette) {
 }
 
 @Composable
-private fun FieldBlock(label: String, palette: Palette, content: @Composable ColumnScope.() -> Unit) {
+private fun FieldBlock(
+    label: String,
+    palette: Palette,
+    error: String? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Text(label, color = palette.text, fontSize = 14.sp)
+        Text(label, color = if (error == null) palette.text else palette.error, fontSize = 14.sp)
         content()
+        if (error != null) {
+            Text(error, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp)
+        }
     }
 }
 
@@ -2591,6 +2813,7 @@ private fun PopupSelect(
         label = "select-arrow"
     )
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val selectSource = remember { MutableInteractionSource() }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2598,7 +2821,7 @@ private fun PopupSelect(
                 .clip(RoundedCornerShape(14.dp))
                 .background(palette.surfaceVariant)
                 .border(BorderStroke(0.8.dp, if (open) palette.text.copy(alpha = 0.32f) else palette.border), RoundedCornerShape(14.dp))
-                .clickable(role = Role.Button) { open = !open }
+                .clickable(interactionSource = selectSource, indication = null, role = Role.Button) { open = !open }
                 .padding(horizontal = 14.dp),
             contentAlignment = Alignment.CenterStart
         ) {
@@ -2641,6 +2864,7 @@ private fun PopupSelect(
                     modifier = Modifier
                         .padding(horizontal = 6.dp, vertical = 1.dp)
                         .fillMaxWidth()
+                        .height(42.dp)
                         .clip(RoundedCornerShape(11.dp))
                         .background(when {
                             pressed -> palette.secondaryButton
@@ -2651,7 +2875,7 @@ private fun PopupSelect(
                             onValue(option.value)
                             open = false
                         }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(0.dp)) {
@@ -2884,16 +3108,34 @@ private fun QTextField(
     modifier: Modifier = Modifier,
     password: Boolean = false,
     singleLine: Boolean = true,
+    error: Boolean = false,
+    onFocusLost: (() -> Unit)? = null,
     onValueChange: (String) -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
+    var hadFocus by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
     Box(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = if (singleLine) 44.dp else 88.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(palette.surfaceVariant)
-            .border(BorderStroke(if (focused) 1.2.dp else 0.7.dp, if (focused) palette.accent.copy(alpha = 0.82f) else palette.border), RoundedCornerShape(14.dp))
+            .border(
+                BorderStroke(
+                    when {
+                        error -> 1.2.dp
+                        focused -> 1.2.dp
+                        else -> 0.7.dp
+                    },
+                    when {
+                        error -> palette.error
+                        focused -> palette.accent.copy(alpha = 0.82f)
+                        else -> palette.border
+                    }
+                ),
+                RoundedCornerShape(14.dp)
+            )
             .padding(horizontal = 16.dp, vertical = 9.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -2902,10 +3144,18 @@ private fun QTextField(
             onValueChange = onValueChange,
             singleLine = singleLine,
             visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+            keyboardOptions = KeyboardOptions(
+                imeAction = if (singleLine) ImeAction.Done else ImeAction.Default
+            ),
+            keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
             textStyle = TextStyle(color = palette.text, fontSize = 14.sp),
             modifier = Modifier
                 .fillMaxWidth()
-                .onFocusChanged { focused = it.isFocused }
+                .onFocusChanged {
+                    if (hadFocus && !it.isFocused) onFocusLost?.invoke()
+                    hadFocus = it.isFocused
+                    focused = it.isFocused
+                }
         )
         val hintAlpha by animateFloatAsState(if (value.isEmpty() && !focused) 1f else 0f, tween(140), label = "hint")
         if (hintAlpha > 0.01f) {
@@ -2921,37 +3171,66 @@ private fun QTextField(
 }
 
 @Composable
-private fun SwitchRow(text: String, checked: Boolean, palette: Palette, onChecked: (Boolean) -> Unit) {
+private fun SwitchRow(
+    text: String,
+    checked: Boolean,
+    palette: Palette,
+    enabled: Boolean = true,
+    error: String? = null,
+    onChecked: (Boolean) -> Unit
+) {
     val thumbOffset by animateDpAsState(if (checked) 20.dp else 0.dp, tween(180), label = "switch-thumb")
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.96f else 1f, tween(130), label = "switch-scale")
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(48.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(text, color = palette.text, fontSize = 14.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Box(
+    Column {
+        Row(
             modifier = Modifier
-                .size(width = 48.dp, height = 28.dp)
-                .graphicsLayer { scaleX = scale; scaleY = scale }
-                .clip(CircleShape)
-                .background(if (checked) palette.accent else palette.secondaryButton)
-                .border(BorderStroke(if (checked) 0.dp else 0.7.dp, palette.border), CircleShape)
-                .clickable(source, indication = null) { onChecked(!checked) },
-            contentAlignment = Alignment.CenterStart
+                .fillMaxWidth()
+                .height(48.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            Text(
+                text,
+                color = when {
+                    error != null -> palette.error
+                    enabled -> palette.text
+                    else -> palette.subText.copy(alpha = 0.55f)
+                },
+                fontSize = 14.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             Box(
                 modifier = Modifier
-                    .padding(start = 4.dp)
-                    .graphicsLayer { translationX = thumbOffset.toPx() }
-                    .size(20.dp)
+                    .size(width = 48.dp, height = 28.dp)
+                    .graphicsLayer { scaleX = if (enabled) scale else 1f; scaleY = if (enabled) scale else 1f }
                     .clip(CircleShape)
-                    .background(palette.onAccent)
-                    .border(BorderStroke(0.7.dp, palette.border), CircleShape)
-            )
+                    .background(
+                        when {
+                            !enabled -> palette.secondaryButton.copy(alpha = 0.45f)
+                            checked -> palette.accent
+                            else -> palette.secondaryButton
+                        }
+                    )
+                    .border(BorderStroke(if (checked) 0.dp else 0.7.dp, palette.border), CircleShape)
+                    .clickable(source, indication = null, enabled = enabled) { onChecked(!checked) },
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Box(
+                    modifier = Modifier
+                        .padding(start = 4.dp)
+                        .graphicsLayer { translationX = thumbOffset.toPx() }
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(if (enabled) palette.onAccent else palette.onAccent.copy(alpha = 0.55f))
+                        .border(BorderStroke(0.7.dp, palette.border), CircleShape)
+                )
+            }
+        }
+        if (error != null) {
+            Text(error, color = palette.error, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(bottom = 4.dp))
         }
     }
 }
@@ -3062,6 +3341,7 @@ private fun ListEditor(
     quickAddLabel: String? = null,
     secondaryQuickAdd: List<String> = emptyList(),
     secondaryQuickAddLabel: String? = null,
+    normalizeItem: (String) -> String = { it },
     onValues: (List<String>) -> Unit
 ) {
     var local by remember(values) { mutableStateOf(values.ifEmpty { emptyList() }) }
@@ -3089,6 +3369,13 @@ private fun ListEditor(
                     onValueChange = {
                         local = local.replaceAt(index, it)
                         onValues(local.cleanItems())
+                    },
+                    onFocusLost = {
+                        val normalized = normalizeItem(value)
+                        if (normalized != value) {
+                            local = local.replaceAt(index, normalized)
+                            onValues(local.cleanItems())
+                        }
                     }
                 )
                 IconButton(onClick = {

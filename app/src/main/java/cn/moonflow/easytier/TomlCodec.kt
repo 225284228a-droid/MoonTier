@@ -6,7 +6,7 @@ object TomlCodec {
     fun build(config: NetworkConfig): String {
         val out = ArrayList<String>()
         val advanced = config.advanced
-        advanced.validate()
+        advanced.validate(config.multiThread, advanced.secureMode)
         fun text(key: String, value: String) { if (value.isNotBlank()) out += "$key = \"${esc(value)}\"" }
         fun list(key: String, values: List<String>) { if (values.isNotEmpty()) out += "$key = ${array(values)}" }
         out += "instance_id = \"${esc(config.id)}\""
@@ -17,13 +17,17 @@ object TomlCodec {
         // dhcp and dhcpv6 default to false in EasyTier, while MoonTier defaults to
         // DHCP on. State the chosen mode so a compact file keeps the same behavior.
         out += "dhcp = ${if (config.dhcp && advanced.dhcpCidr.isNotBlank()) "\"${esc(advanced.dhcpCidr.trim())}\"" else config.dhcp.toString()}"
-        if (advanced.dhcpv6) {
-            out += "dhcpv6 = ${if (advanced.dhcpv6Cidr.isNotBlank()) "\"${esc(advanced.dhcpv6Cidr.trim())}\"" else "true"}"
+        if (!config.disableIpv6) {
+            if (advanced.dhcpv6) {
+                out += "dhcpv6 = ${if (advanced.dhcpv6Cidr.isNotBlank()) "\"${esc(advanced.dhcpv6Cidr.trim())}\"" else "true"}"
+            }
+            if (!advanced.dhcpv6) text("ipv6", advanced.ipv6)
+            if (advanced.ipv6PublicAddrProvider) {
+                out += "ipv6_public_addr_provider = true"
+                if (advanced.ipv6PublicAddrAuto) out += "ipv6_public_addr_auto = true"
+                text("ipv6_public_addr_prefix", advanced.ipv6PublicAddrPrefix)
+            }
         }
-        if (!advanced.dhcpv6) text("ipv6", advanced.ipv6)
-        if (advanced.ipv6PublicAddrProvider) out += "ipv6_public_addr_provider = true"
-        if (advanced.ipv6PublicAddrAuto) out += "ipv6_public_addr_auto = true"
-        text("ipv6_public_addr_prefix", advanced.ipv6PublicAddrPrefix)
         text("socks5_proxy", advanced.socks5Proxy)
         list("mapped_listeners", advanced.mappedListeners)
         list("tcp_stun_servers", advanced.tcpStunServers)
@@ -62,10 +66,12 @@ object TomlCodec {
         } else if (advanced.dataCompressAlgo.isNotBlank()) {
             flags += "data_compress_algo = \"${esc(advanced.dataCompressAlgo)}\""
         }
-        if (advanced.multiThreadCount.isNotBlank()) flags += "multi_thread_count = ${advanced.multiThreadCount.trim()}"
+        if (config.multiThread && advanced.multiThreadCount.isNotBlank()) {
+            flags += "multi_thread_count = ${advanced.multiThreadCount.trim()}"
+        }
         unsigned64("instance_recv_bps_limit", advanced.instanceRecvBpsLimit, flags)
         unsigned64("foreign_relay_bps_limit", advanced.foreignRelayBpsLimit, flags)
-        if (advanced.tldDnsZone.isNotBlank() && advanced.tldDnsZone != "et.net.") {
+        if (config.enableMagicDns && advanced.tldDnsZone.isNotBlank() && advanced.tldDnsZone != "et.net.") {
             flags += "tld_dns_zone = \"${esc(advanced.tldDnsZone)}\""
         }
         if (advanced.socketMark.isNotBlank()) flags += "socket_mark = ${advanced.socketMark.trim()}"
@@ -102,7 +108,7 @@ object TomlCodec {
         flag("disable_udp_hole_punching", config.disableUdpHolePunching)
         flag("disable_tcp_hole_punching", config.disableTcpHolePunching)
         flag("disable_upnp", config.disableUpnp)
-        flag("proxy_forward_by_system", config.proxyForwardBySystem)
+        flag("proxy_forward_by_system", config.proxyForwardBySystem && !config.noTun)
         if (config.mtu > 0 && config.mtu != DEFAULT_MTU) flags += "mtu = ${config.mtu}"
         if (config.enableRelayNetworkWhitelist) {
             flags += "relay_network_whitelist = \"${esc(config.relayNetworkWhitelist.cleanItems().joinToString(" "))}\""
@@ -110,7 +116,9 @@ object TomlCodec {
         // 2.6 defaults to tcp, 2.7 to udp; always state it to keep one profile's
         // transport preference stable across core versions.
         flags += "default_protocol = \"${esc(config.defaultProtocol.ifBlank { "tcp" })}\""
-        if (config.encryptionAlgorithm != "aes-gcm") flags += "encryption_algorithm = \"${esc(config.encryptionAlgorithm)}\""
+        if (config.enableEncryption && config.encryptionAlgorithm != "aes-gcm") {
+            flags += "encryption_algorithm = \"${esc(config.encryptionAlgorithm)}\""
+        }
         if (flags.isNotEmpty()) {
             out += ""
             out += "[flags]"
@@ -121,7 +129,7 @@ object TomlCodec {
             out += ""
             out += "[[peer]]"
             out += "uri = \"${esc(it)}\""
-            text("peer_public_key", advanced.peerKeys[it].orEmpty())
+            if (advanced.secureMode) text("peer_public_key", advanced.peerKeys[it].orEmpty())
         }
 
         config.proxyCidrs.cleanItems().forEach { cidr ->
@@ -133,14 +141,14 @@ object TomlCodec {
                 mapping.allow?.let { out += "allow = ${array(it)}" }
             }
         }
-        if (advanced.secureMode || advanced.privateKey.isNotBlank() || advanced.publicKey.isNotBlank()) {
+        if (advanced.secureMode) {
             out += ""
             out += "[secure_mode]"
-            out += "enabled = ${advanced.secureMode}"
+            out += "enabled = true"
             text("local_private_key", advanced.privateKey)
             text("local_public_key", advanced.publicKey)
         }
-        advanced.managedCredentials.forEach { credential ->
+        if (advanced.secureMode) advanced.managedCredentials.forEach { credential ->
             out += ""
             out += "[[managed_credentials]]"
             text("credential_id", credential.id)
@@ -158,10 +166,10 @@ object TomlCodec {
             text("dst_addr", rule.dstAddr)
             text("proto", rule.proto)
         }
-        if (advanced.enableVpnPortal || advanced.vpnPortalClients.isNotEmpty() || advanced.vpnPortalPrivateKey.isNotBlank()) {
+        if (advanced.enableVpnPortal) {
             out += ""
             out += "[vpn_portal_config]"
-            out += "enabled = ${advanced.enableVpnPortal}"
+            out += "enabled = true"
             text("wireguard_listen", advanced.vpnPortalListen)
             text("wireguard_private_key", advanced.vpnPortalPrivateKey)
             advanced.vpnPortalClients.forEach { client ->
@@ -261,7 +269,8 @@ object TomlCodec {
             relayNetworkWhitelist = relayWhitelist.cleanItems(),
             proxyForwardBySystem = bool(flags["proxy_forward_by_system"], false),
             enableExitNode = bool(flags["enable_exit_node"], false),
-            enableMagicDns = bool(flags["accept_dns"], false),
+            enableMagicDns = bool(flags["accept_dns"], false) ||
+                scalar(flags["tld_dns_zone"].orEmpty()).let { it.isNotBlank() && it != "et.net." },
             enablePrivateMode = bool(flags["private_mode"], true),
             enableEncryption = bool(flags["enable_encryption"], true),
             enableKcpProxy = bool(flags["enable_kcp_proxy"], false),

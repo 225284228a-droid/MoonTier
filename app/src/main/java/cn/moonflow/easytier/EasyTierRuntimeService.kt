@@ -56,6 +56,7 @@ class EasyTierRuntimeService : Service() {
         const val ACTION_ENABLE_INSTANCE = "cn.moonflow.easytier.runtime.ENABLE_INSTANCE"
         const val ACTION_DELETE_INSTANCE = "cn.moonflow.easytier.runtime.DELETE_INSTANCE"
         const val ACTION_CONFIG_SERVER = "cn.moonflow.easytier.runtime.CONFIG_SERVER"
+        const val ACTION_DISCONNECT_CONFIG_SERVER = "cn.moonflow.easytier.runtime.DISCONNECT_CONFIG_SERVER"
         const val EXTRA_CONFIG = "config"
         const val EXTRA_INSTANCE_ID = "instance_id"
         const val EXTRA_SERVER_URL = "server_url"

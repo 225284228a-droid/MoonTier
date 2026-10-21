@@ -165,4 +165,66 @@ class NetworkConfigCodecTest {
             TomlCodec.build(NetworkConfig(advanced = AdvancedNetworkConfig(socketMark = "4294967296")))
         }
     }
+
+    @Test fun disabledFeaturesDoNotLeakIntoCoreConfig() {
+        val key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        val toml = TomlCodec.build(
+            NetworkConfig(
+                disableIpv6 = true,
+                noTun = true,
+                proxyForwardBySystem = true,
+                enableEncryption = false,
+                enableMagicDns = false,
+                multiThread = false,
+                advanced = AdvancedNetworkConfig(
+                    secureMode = false,
+                    privateKey = key,
+                    publicKey = key,
+                    managedCredentials = listOf(ManagedCredential(id = "guest", secret = key)),
+                    ipv6 = "fd12:3456::2/64",
+                    ipv6PublicAddrProvider = true,
+                    ipv6PublicAddrPrefix = "2001:db8:1::/64",
+                    dhcpv6 = true,
+                    dhcpv6Cidr = "fd12:3456::/64",
+                    multiThreadCount = "4",
+                    tldDnsZone = "mesh.example.",
+                    enableVpnPortal = false,
+                    vpnPortalPrivateKey = key,
+                    vpnPortalClients = listOf(VpnPortalClient("phone", "10.30.0.10/24", emptyList()))
+                ),
+                encryptionAlgorithm = "chacha20"
+            )
+        )
+        listOf(
+            "[secure_mode]",
+            "local_private_key",
+            "local_public_key",
+            "[[managed_credentials]]",
+            "fd12:3456",
+            "dhcpv6",
+            "ipv6_public_addr",
+            "multi_thread_count",
+            "tld_dns_zone",
+            "encryption_algorithm",
+            "proxy_forward_by_system",
+            "[vpn_portal_config]"
+        ).forEach { assertFalse("$it should be omitted", toml.contains(it)) }
+        assertTrue(toml.contains("enable_ipv6 = false"))
+    }
+
+    @Test fun hiddenInvalidDependentValuesDoNotFailBuild() {
+        val toml = TomlCodec.build(
+            NetworkConfig(
+                multiThread = false,
+                advanced = AdvancedNetworkConfig(
+                    multiThreadCount = "not-a-number",
+                    managedCredentials = listOf(
+                        ManagedCredential(id = "guest", secret = "bad", expiryUnix = "not-a-time")
+                    )
+                )
+            )
+        )
+        assertFalse(toml.contains("multi_thread_count"))
+        assertFalse(toml.contains("[[managed_credentials]]"))
+    }
 }

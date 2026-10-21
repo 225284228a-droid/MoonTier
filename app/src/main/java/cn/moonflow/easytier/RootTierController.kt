@@ -283,8 +283,7 @@ class RootTierController(private val context: Context) {
             configId = config.id,
             displayName = config.displayName,
             instanceName = config.instanceName,
-            starting = true,
-            logs = listOf("正在通过共享 manager 启动实例")
+            starting = true
         )
         state = state.copy(instances = state.instances.filterNot { it.configId == config.id } + starting)
         scope.launch {
@@ -428,8 +427,7 @@ class RootTierController(private val context: Context) {
                 starting = true,
                 stopping = false,
                 serverUrl = settings.configServerUrl.trim(),
-                error = "",
-                logs = listOf("正在把配置服务器接入共享 manager")
+                error = ""
             )
         )
         scope.launch {
@@ -555,7 +553,19 @@ class RootTierController(private val context: Context) {
         }
 
         writeLocalMeta(config)
-        return refreshedState(queryManagerSnapshot(), options)
+        // `run` returns before the manager necessarily publishes the new instance.
+        // Poll briefly so the caller does not replace the visible "starting" card
+        // with a snapshot that has no instance (which made the startup log flash).
+        val deadline = SystemClock.elapsedRealtime() + START_REGISTRATION_TIMEOUT_MS
+        var snapshot = queryManagerSnapshot()
+        while (config.id !in snapshot.instanceIds && SystemClock.elapsedRealtime() < deadline) {
+            Thread.sleep(200)
+            snapshot = queryManagerSnapshot()
+        }
+        check(config.id in snapshot.instanceIds) {
+            "实例启动后未出现在 manager 列表中，请稍后重试或查看运行日志"
+        }
+        return refreshedState(snapshot, options)
     }
 
     private fun stopBlocking(configId: String): RefreshedState {
@@ -849,7 +859,6 @@ class RootTierController(private val context: Context) {
             }
         }
 
-        val previousById = state.instances.associateBy { it.configId }
         val localIds = localMeta.keys.filterTo(LinkedHashSet()) { id ->
             snapshot.metas[id]?.source != CONFIG_SOURCE_WEB
         }
@@ -858,7 +867,6 @@ class RootTierController(private val context: Context) {
             .map { id ->
                 val meta = localMeta[id]
                 val config = configs[id]
-                val previous = previousById[id]
                 val info = snapshot.runningInfo.optJSONObject(id)
                 val parsed = parseInstanceInfo(info)
                 RootInstanceState(
@@ -874,13 +882,7 @@ class RootTierController(private val context: Context) {
                     running = parsed.running,
                     localCidr = parsed.localCidr,
                     nodes = parsed.nodes,
-                    logs = filteredCoreLogs(parsed.logs).let { logs ->
-                        if (logs.isNotEmpty() || CoreLogLevel.normalize(store.loadSettings().coreLogLevel) == CoreLogLevel.OFF) {
-                            logs
-                        } else {
-                            previous?.logs.orEmpty()
-                        }
-                    },
+                    logs = filteredCoreLogs(parsed.logs),
                     error = parsed.error
                 )
             }
@@ -1319,6 +1321,7 @@ class RootTierController(private val context: Context) {
             RegexOption.IGNORE_CASE
         )
         private const val MANAGER_RPC_PORTAL = "127.0.0.1:14999"
+        private const val START_REGISTRATION_TIMEOUT_MS = 5_000L
         private const val CONFIG_SOURCE_WEB = 2
         private val CONFIG_SERVER_TOKEN_REGEX =
             Regex("((?:udp|tcp|ws|wss)://[^\\s/]+/)[^\\s]+", RegexOption.IGNORE_CASE)

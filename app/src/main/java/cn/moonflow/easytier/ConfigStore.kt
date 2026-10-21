@@ -118,7 +118,11 @@ class ConfigStore(private val context: Context) {
             configServerMachineId = settings.configServerMachineId,
             configServerSecureMode = settings.configServerSecureMode,
             configServerAutoConnect = settings.configServerAutoConnect,
-            ffiConfigServerUrl = settings.ffiConfigServerUrl
+            ffiConfigServerUrl = settings.ffiConfigServerUrl,
+            ffiConfigServerHostname = settings.ffiConfigServerHostname,
+            ffiConfigServerMachineId = settings.ffiConfigServerMachineId,
+            ffiConfigServerSecureMode = settings.ffiConfigServerSecureMode,
+            ffiConfigServerAutoConnect = settings.ffiConfigServerAutoConnect
         )
         writeTextAtomic(settingsFile, merged.toJson().toString(2))
     }

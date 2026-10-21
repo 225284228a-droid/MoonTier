@@ -43,18 +43,20 @@ data class AdvancedNetworkConfig(
     val proxyMappings: List<ProxyMapping> = emptyList(),
     val peerKeys: Map<String, String> = emptyMap()
 ) {
-    fun validate() {
+    fun validate(multiThread: Boolean = true, secureMode: Boolean = true) {
         fun unsigned(value: String, label: String, max: ULong = ULong.MAX_VALUE, nonZero: Boolean = false) {
             if (value.isBlank()) return
             val number = value.trim().toULongOrNull()
             require(number != null && number <= max && (!nonZero || number > 0u)) { "$label 必须是有效的非负整数${if (nonZero) "且大于 0" else ""}" }
         }
-        unsigned(multiThreadCount, "工作线程数", UInt.MAX_VALUE.toULong(), true)
+        if (multiThread) unsigned(multiThreadCount, "工作线程数", UInt.MAX_VALUE.toULong(), true)
         unsigned(socketMark, "Socket Mark", UInt.MAX_VALUE.toULong())
         unsigned(instanceRecvBpsLimit, "接收限速")
         unsigned(foreignRelayBpsLimit, "中继限速")
-        managedCredentials.forEach {
-            require(it.expiryUnix.ifBlank { "0" }.toLongOrNull()?.let { value -> value >= 0 } == true) { "凭据过期时间必须是有效的 Unix 秒数" }
+        if (secureMode) {
+            managedCredentials.forEach {
+                require(it.expiryUnix.ifBlank { "0" }.toLongOrNull()?.let { value -> value >= 0 } == true) { "凭据过期时间必须是有效的 Unix 秒数" }
+            }
         }
     }
 

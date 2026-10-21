@@ -81,14 +81,20 @@ class EasyTierController private constructor(private val context: Context) {
         .setAction(EasyTierRuntimeService.ACTION_CONFIG_SERVER)
         .putExtra(EasyTierRuntimeService.EXTRA_SERVER_URL, url.trim()))
 
+    fun disconnectConfigServer() = dispatch(Intent(context, EasyTierRuntimeService::class.java)
+        .setAction(EasyTierRuntimeService.ACTION_DISCONNECT_CONFIG_SERVER))
+
     fun forgetConfig(id: String) = dispatch(Intent(context, EasyTierRuntimeService::class.java)
         .setAction(EasyTierRuntimeService.ACTION_DELETE_INSTANCE)
         .putExtra(EasyTierRuntimeService.EXTRA_INSTANCE_ID, id))
 
     fun attachIfRunning(localConfigs: List<NetworkConfig>) {
         if (store.loadSettings().rootModeEnabled || service != null) return
+        val settings = store.loadSettings()
         val saved = runCatching { FfiRuntimeConfig.parseSnapshot(store.loadFfiRuntime()) }.getOrDefault(emptyList())
-        if (saved.any { it.enabled } || store.loadSettings().ffiConfigServerUrl.isNotBlank()) {
+        if (saved.any { it.enabled } ||
+            (settings.ffiConfigServerAutoConnect && settings.ffiConfigServerUrl.isNotBlank())
+        ) {
             dispatch(Intent(context, EasyTierRuntimeService::class.java).setAction(EasyTierRuntimeService.ACTION_RESTORE))
         } else {
             val localNames = localConfigs.associate { it.id to it.displayName }
@@ -152,13 +158,17 @@ class EasyTierController private constructor(private val context: Context) {
                 }
                 EasyTierRuntimeService.ACTION_CONFIG_SERVER ->
                     applyConfigServer(intent.getStringExtra(EasyTierRuntimeService.EXTRA_SERVER_URL).orEmpty(), save = true)
+                EasyTierRuntimeService.ACTION_DISCONNECT_CONFIG_SERVER ->
+                    applyConfigServer("", save = false)
                 EasyTierRuntimeService.ACTION_DELETE_INSTANCE -> {
                     val id = intent.getStringExtra(EasyTierRuntimeService.EXTRA_INSTANCE_ID).orEmpty()
                     val entry = FfiRuntimeConfig.parseSnapshot(native { NativeEasyTier.collectRuntimeConfigs() })
                         .firstOrNull { it.instanceId == id }
                     if (entry != null) native { NativeEasyTier.deleteNetworkInstance(entry.instanceName) }
                 }
-                else -> if (!serverActive) applyConfigServer(store.loadSettings().ffiConfigServerUrl, save = false)
+                else -> if (!serverActive && store.loadSettings().ffiConfigServerAutoConnect) {
+                    applyConfigServer(store.loadSettings().ffiConfigServerUrl, save = false)
+                }
             }
             refresh()
             stopServiceIfIdle(startId)
@@ -189,24 +199,63 @@ class EasyTierController private constructor(private val context: Context) {
             if (save) store.saveFfiConfigServerUrl(desired)
             return
         }
+        if (!serverActive && desired.isBlank()) {
+            configServerState = configServerState.copy(
+                running = false,
+                starting = false,
+                stopping = false,
+                connected = false,
+                error = ""
+            )
+            return
+        }
+        val settings = store.loadSettings()
         val previous = if (serverActive) serverUrl else ""
-        configServerState = configServerState.copy(starting = desired.isNotBlank(), stopping = desired.isBlank(), error = "")
+        configServerState = configServerState.copy(
+            starting = desired.isNotBlank(),
+            stopping = desired.isBlank(),
+            error = ""
+        )
         serverGeneration++
         native { NativeEasyTier.detachConfigServerClient() }
         serverActive = false
         try {
             if (desired.isNotBlank()) {
-                native { NativeEasyTier.startConfigServerClient(desired, null, store.ffiMachineId(), false, serverGeneration) }
+                native {
+                    NativeEasyTier.startConfigServerClient(
+                        desired,
+                        effectiveConfigServerHostname(settings),
+                        settings.ffiConfigServerMachineId.trim().ifBlank { store.ffiMachineId() },
+                        settings.ffiConfigServerSecureMode,
+                        serverGeneration
+                    )
+                }
                 serverActive = true
             }
             serverUrl = desired
             if (save) store.saveFfiConfigServerUrl(desired)
-            configServerState = configServerState.copy(starting = false, stopping = false, running = serverActive, serverUrl = desired)
+            configServerState = configServerState.copy(
+                starting = false,
+                stopping = false,
+                running = serverActive,
+                connected = false,
+                serverUrl = desired
+            )
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
             if (previous.isNotBlank()) {
                 serverGeneration++
-                runCatching { native { NativeEasyTier.startConfigServerClient(previous, null, store.ffiMachineId(), false, serverGeneration) } }
+                runCatching {
+                    native {
+                        NativeEasyTier.startConfigServerClient(
+                            previous,
+                            effectiveConfigServerHostname(settings),
+                            settings.ffiConfigServerMachineId.trim().ifBlank { store.ffiMachineId() },
+                            settings.ffiConfigServerSecureMode,
+                            serverGeneration
+                        )
+                    }
+                }
                     .onSuccess { serverActive = true }
             }
             configServerState = configServerState.copy(starting = false, stopping = false, running = serverActive,
@@ -252,7 +301,13 @@ class EasyTierController private constructor(private val context: Context) {
             if (eventGeneration != serverGeneration) continue
             // A remote update can replace an instance without changing UUID or routes.
             if (payload.stringValue("event") == "run_network_instance") gate.invalidate()
-            if (!payload.optBoolean("success", true)) configServerState = configServerState.copy(error = payload.stringValue("error"))
+            val eventName = payload.stringValue("event")
+            if (!payload.optBoolean("success", true)) {
+                val message = payload.stringValue("error").ifBlank { "配置服务器操作失败" }
+                configServerState = configServerState.copy(error = message)
+            } else if (eventName.isNotBlank()) {
+                AppDiagnostics.event("ffi", "config server event: $eventName")
+            }
         }
         val localNames = store.loadConfigs().associate { it.id to it.displayName }
         val tunConfig = JSONObject(native { NativeEasyTier.sharedTunConfig() })
@@ -344,6 +399,24 @@ class EasyTierController private constructor(private val context: Context) {
             try {
                 if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
             } catch (error: Throwable) { onVpnServiceStartFailed(error) }
+        }
+    }
+
+    private fun effectiveConfigServerHostname(settings: AppSettings): String {
+        val candidates = listOf(
+            runCatching {
+                Settings.Global.getString(context.contentResolver, "device_name")
+            }.getOrNull(),
+            runCatching {
+                android.provider.Settings.Secure.getString(context.contentResolver, "bluetooth_name")
+            }.getOrNull(),
+            Build.MODEL,
+            Build.DEVICE
+        )
+        return settings.ffiConfigServerHostname.trim().ifBlank {
+            candidates.map { it.orEmpty().trim() }
+                .firstOrNull { it.isNotBlank() && !it.equals("localhost", ignoreCase = true) }
+                ?: "MoonTier-Android"
         }
     }
 
@@ -501,8 +574,7 @@ class EasyTierController private constructor(private val context: Context) {
         if (!serverActive && configs.none { it.enabled }) service?.stopSelfResult(startId)
     }
 
-    @Suppress("UNUSED_PARAMETER")
-    fun updatePollingConditions(isForeground: Boolean, expanded: Boolean = false) {
+    fun updatePollingConditions(isForeground: Boolean) {
         val resumed = !foreground && isForeground
         foreground = isForeground
         if (resumed) requestRefresh()

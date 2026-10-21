@@ -238,7 +238,11 @@ data class AppSettings(
     val configServerMachineId: String = "",
     val configServerSecureMode: Boolean = true,
     val configServerAutoConnect: Boolean = false,
-    val ffiConfigServerUrl: String = ""
+    val ffiConfigServerUrl: String = "",
+    val ffiConfigServerHostname: String = "",
+    val ffiConfigServerMachineId: String = "",
+    val ffiConfigServerSecureMode: Boolean = true,
+    val ffiConfigServerAutoConnect: Boolean = false
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("auto_sync_official_servers", autoSyncOfficialServers)
@@ -254,6 +258,10 @@ data class AppSettings(
         .put("config_server_secure_mode", configServerSecureMode)
         .put("config_server_auto_connect", configServerAutoConnect)
         .put("ffi_config_server_url", ffiConfigServerUrl)
+        .put("ffi_config_server_hostname", ffiConfigServerHostname)
+        .put("ffi_config_server_machine_id", ffiConfigServerMachineId)
+        .put("ffi_config_server_secure_mode", ffiConfigServerSecureMode)
+        .put("ffi_config_server_auto_connect", ffiConfigServerAutoConnect)
 
     companion object {
         fun fromJson(obj: JSONObject): AppSettings = AppSettings(
@@ -269,7 +277,11 @@ data class AppSettings(
             configServerMachineId = obj.optString("config_server_machine_id", ""),
             configServerSecureMode = obj.optBoolean("config_server_secure_mode", true),
             configServerAutoConnect = obj.optBoolean("config_server_auto_connect", false),
-            ffiConfigServerUrl = (obj.opt("ffi_config_server_url") as? String).orEmpty()
+            ffiConfigServerUrl = (obj.opt("ffi_config_server_url") as? String).orEmpty(),
+            ffiConfigServerHostname = obj.optString("ffi_config_server_hostname", ""),
+            ffiConfigServerMachineId = obj.optString("ffi_config_server_machine_id", ""),
+            ffiConfigServerSecureMode = obj.optBoolean("ffi_config_server_secure_mode", true),
+            ffiConfigServerAutoConnect = obj.optBoolean("ffi_config_server_auto_connect", false)
         )
     }
 }

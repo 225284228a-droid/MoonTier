@@ -8,12 +8,22 @@ class FfiRuntimeSnapshotTest {
     @Test fun ffiAddressDoesNotChangeRootSettings() {
         val original = AppSettings(configServerUrl = "udp://root.example:22020/root-user",
             configServerHostname = "root-device", configServerSecureMode = true, configServerAutoConnect = true)
-        val restored = AppSettings.fromJson(original.copy(ffiConfigServerUrl = "vpn-user").toJson())
+        val restored = AppSettings.fromJson(original.copy(
+            ffiConfigServerUrl = "vpn-user",
+            ffiConfigServerHostname = "vpn-device",
+            ffiConfigServerMachineId = "vpn-machine",
+            ffiConfigServerSecureMode = false,
+            ffiConfigServerAutoConnect = true
+        ).toJson())
         assertEquals(original.configServerUrl, restored.configServerUrl)
         assertEquals(original.configServerHostname, restored.configServerHostname)
         assertTrue(restored.configServerSecureMode)
         assertTrue(restored.configServerAutoConnect)
         assertEquals("vpn-user", restored.ffiConfigServerUrl)
+        assertEquals("vpn-device", restored.ffiConfigServerHostname)
+        assertEquals("vpn-machine", restored.ffiConfigServerMachineId)
+        assertFalse(restored.ffiConfigServerSecureMode)
+        assertTrue(restored.ffiConfigServerAutoConnect)
         assertEquals("", AppSettings.fromJson(JSONObject("""{"ffi_config_server_url":null}""")).ffiConfigServerUrl)
     }
 
