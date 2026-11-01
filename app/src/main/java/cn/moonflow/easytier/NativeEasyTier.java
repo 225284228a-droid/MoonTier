@@ -31,6 +31,7 @@ public final class NativeEasyTier {
     public static native String drainConfigServerEvents();
     public static native void setRuntimeEventsEnabled(boolean enabled);
     public static native String getLastError();
+    public static native void trimNativeHeap();
 
     private static volatile Runnable eventListener;
 

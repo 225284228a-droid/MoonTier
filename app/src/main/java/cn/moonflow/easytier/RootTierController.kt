@@ -23,6 +23,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.RandomAccessFile
 
 class RootTierController(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -45,6 +46,7 @@ class RootTierController(private val context: Context) {
     private var operationGeneration = 0L
     @Volatile private var shutdownGeneration = 0L
     private var lastRootPlan = RootRoutingPlan(emptyList())
+    @Volatile private var managerLogTail: Pair<ManagerLogTailKey, List<String>>? = null
 
     var state by mutableStateOf(RootTierState())
         private set
@@ -775,13 +777,20 @@ class RootTierController(private val context: Context) {
         val result = runCatching {
             withContext(Dispatchers.IO) {
                 managerMutex.withLock {
-                    if (!managerAlive()) {
+                    // A successful snapshot RPC already proves the manager is alive, so
+                    // only spawn the extra `kill -0` su process when the RPC fails.
+                    val snapshot = if (managerPid() <= 0) null else try {
+                        queryManagerSnapshot()
+                    } catch (error: Exception) {
+                        if (managerAlive()) throw error
+                        null
+                    }
+                    if (snapshot == null) {
                         removeRootRouting()
                         null
                     } else {
                         val options = loadManagerOptions()
                             ?: optionsFromSettings(store.loadSettings(), enabled = false)
-                        val snapshot = queryManagerSnapshot()
                         val refreshed = refreshedState(snapshot, options)
                         applyRootRouting(snapshot)
                         refreshed
@@ -1131,23 +1140,39 @@ class RootTierController(private val context: Context) {
         trimManagerLog()
         val rawUrl = options?.rawConfigServerUrl.orEmpty()
         val resolvedUrl = options?.resolvedConfigServerUrl.orEmpty()
-        return runCatching { managerLogFile.readText() }
+        val key = ManagerLogTailKey(managerLogFile.length(), managerLogFile.lastModified(), rawUrl, resolvedUrl)
+        managerLogTail?.takeIf { it.first == key }?.let { return it.second }
+        // Only the last 80 lines are shown, so never decode the whole log every poll.
+        val lines = runCatching { readFileTail(managerLogFile, MANAGER_LOG_TAIL_BYTES) }
             .getOrDefault("")
             .lineSequence()
             .filter { it.isNotBlank() }
             .map { redactConfigServerToken(it, rawUrl, resolvedUrl) }
             .toList()
             .takeLast(80)
+        managerLogTail = key to lines
+        return lines
     }
 
     private fun trimManagerLog() {
         if (managerLogFile.length() <= MAX_MANAGER_LOG_BYTES) return
         runCatching {
-            managerLogFile.writeText(
-                managerLogFile.readText().takeLast(MAX_MANAGER_LOG_BYTES / 2)
-            )
+            val tail = readFileTail(managerLogFile, MAX_MANAGER_LOG_BYTES / 2)
+            managerLogFile.writeText(tail)
         }.onFailure { AppDiagnostics.warn("root", "manager log trimming failed", it) }
     }
+
+    private fun readFileTail(file: File, maxBytes: Int): String =
+        RandomAccessFile(file, "r").use { input ->
+            val length = input.length()
+            val start = (length - maxBytes).coerceAtLeast(0L)
+            val bytes = ByteArray((length - start).toInt())
+            input.seek(start)
+            input.readFully(bytes)
+            val text = String(bytes, Charsets.UTF_8)
+            // Drop the partial first line when the read starts mid-file.
+            if (start > 0) text.substringAfter('\n', "") else text
+        }
 
     private fun filteredCoreLogs(logs: List<String>): List<String> = when (
         CoreLogLevel.normalize(store.loadSettings().coreLogLevel)
@@ -1293,6 +1318,13 @@ class RootTierController(private val context: Context) {
         val runningInfo: JSONObject
     )
 
+    private data class ManagerLogTailKey(
+        val length: Long,
+        val modifiedAt: Long,
+        val rawUrl: String,
+        val resolvedUrl: String
+    )
+
     private data class ParsedInstanceInfo(
         val running: Boolean = false,
         val localCidr: String = "",
@@ -1316,6 +1348,7 @@ class RootTierController(private val context: Context) {
     companion object {
         private const val TAG = "MoonTierRoot"
         private const val MAX_MANAGER_LOG_BYTES = 512 * 1024
+        private const val MANAGER_LOG_TAIL_BYTES = 32 * 1024
         private val IMPORTANT_CORE_LOG = Regex(
             "error|warn|fail|panic|closed|stop|disconnect|exit|timeout",
             RegexOption.IGNORE_CASE

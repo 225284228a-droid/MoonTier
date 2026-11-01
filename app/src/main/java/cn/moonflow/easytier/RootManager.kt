@@ -71,15 +71,25 @@ object RootManager {
     }
 
     private fun runProcess(cmd: List<String>, timeoutMs: Long): ShellResult {
+        val process = try {
+            ProcessBuilder(cmd).redirectErrorStream(true).start()
+        } catch (e: Exception) {
+            return ShellResult(-1, e.message ?: "无法执行 root 命令")
+        }
         return try {
-            val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
+            // Nothing is written to stdin. Close it now so su sees EOF and the
+            // pipe descriptor is not left for the finalizer.
+            runCatching { process.outputStream.close() }
             val output = StringBuilder()
             val reader = Thread({
-                process.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        synchronized(output) {
-                            if (output.isNotEmpty()) output.append('\n')
-                            output.append(line)
+                // The stream is closed below once the command finishes or times out.
+                runCatching {
+                    process.inputStream.bufferedReader().useLines { lines ->
+                        lines.forEach { line ->
+                            synchronized(output) {
+                                if (output.isNotEmpty()) output.append('\n')
+                                output.append(line)
+                            }
                         }
                     }
                 }
@@ -97,6 +107,12 @@ object RootManager {
             ShellResult(process.exitValue(), synchronized(output) { output.toString().trim() })
         } catch (e: Exception) {
             ShellResult(-1, e.message ?: "无法执行 root 命令")
+        } finally {
+            // Root polling spawns su every second; release the pipes eagerly
+            // instead of waiting for GC to finalize each Process.
+            runCatching { process.inputStream.close() }
+            runCatching { process.errorStream.close() }
+            process.destroy()
         }
     }
 

@@ -25,6 +25,11 @@ class EasyTierRuntimeService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) controller.trimNativeHeap()
+    }
+
     override fun onDestroy() {
         controller.onServiceDestroyed(this)
         super.onDestroy()

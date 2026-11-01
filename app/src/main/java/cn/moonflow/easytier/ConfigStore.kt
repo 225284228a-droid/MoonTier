@@ -21,8 +21,8 @@ class ConfigStore(private val context: Context) {
     private val settingsFile = File(context.filesDir, "settings.json")
 
     @Synchronized
-    fun loadConfigs(): List<NetworkConfig> {
-        val raw = readJsonArray(configsFile)
+    fun loadConfigs(): List<NetworkConfig> = cached(configsFile) { text ->
+        val raw = runCatching { JSONArray(text) }.getOrNull()
         val configs = buildList {
             if (raw != null) {
                 for (i in 0 until raw.length()) {
@@ -32,7 +32,7 @@ class ConfigStore(private val context: Context) {
         }
         val normalized = normalizeConfigs(configs)
         if (normalized != configs) saveConfigs(normalized)
-        return normalized
+        normalized
     }
 
     @Synchronized
@@ -98,9 +98,8 @@ class ConfigStore(private val context: Context) {
         loadConfigs().firstOrNull { it.isDefault } ?: loadConfigs().firstOrNull()
 
     @Synchronized
-    fun loadSettings(): AppSettings {
-        val obj = readJsonObject(settingsFile) ?: return AppSettings()
-        return AppSettings.fromJson(obj)
+    fun loadSettings(): AppSettings = cached(settingsFile) { text ->
+        runCatching { JSONObject(text) }.getOrNull()?.let(AppSettings::fromJson) ?: AppSettings()
     }
 
     @Synchronized
@@ -280,8 +279,29 @@ class ConfigStore(private val context: Context) {
     private fun readJsonArray(file: File): JSONArray? =
         runCatching { JSONArray(readTextAtomic(file)) }.getOrNull()
 
-    private fun readJsonObject(file: File): JSONObject? =
-        runCatching { JSONObject(readTextAtomic(file)) }.getOrNull()
+    /**
+     * Runtime polling reads settings and configs several times per second.
+     * Parsed values are immutable, so they are shared process-wide across
+     * ConfigStore instances until the file is rewritten.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun <T : Any> cached(file: File, parse: (String) -> T): T {
+        val key = file.absolutePath
+        val stamp = file.lastModified()
+        val length = file.length()
+        val generation: Long
+        synchronized(parsedCache) {
+            val entry = parsedCache[key]
+            if (entry != null && entry.stamp == stamp && entry.length == length) return entry.value as T
+            generation = cacheGeneration
+        }
+        val value = parse(readTextAtomic(file))
+        synchronized(parsedCache) {
+            // A concurrent write from another instance makes this read stale.
+            if (generation == cacheGeneration) parsedCache[key] = CachedFile(stamp, length, value)
+        }
+        return value
+    }
 
     private fun readTextAtomic(file: File): String {
         if (!file.exists()) return ""
@@ -298,6 +318,11 @@ class ConfigStore(private val context: Context) {
         } catch (throwable: Throwable) {
             atomicFile.failWrite(stream)
             throw throwable
+        } finally {
+            synchronized(parsedCache) {
+                cacheGeneration++
+                parsedCache.remove(file.absolutePath)
+            }
         }
     }
 
@@ -404,6 +429,11 @@ class ConfigStore(private val context: Context) {
             .distinct()
     }.getOrDefault(emptyList())
 }
+
+private class CachedFile(val stamp: Long, val length: Long, val value: Any)
+
+private val parsedCache = HashMap<String, CachedFile>()
+private var cacheGeneration = 0L
 
 data class SyncResult(
     val success: Boolean,

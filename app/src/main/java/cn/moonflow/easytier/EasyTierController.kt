@@ -36,6 +36,7 @@ class EasyTierController private constructor(private val context: Context) {
     private var initialized = false
     private var foreground = true
     private var refreshQueued = false
+    private var lastRefreshAt = 0L
     private var serverActive = false
     private var serverUrl = ""
     private var serverGeneration = 0L
@@ -272,12 +273,18 @@ class EasyTierController private constructor(private val context: Context) {
         scope?.launch {
             if (!initialized || refreshQueued) return@launch
             refreshQueued = true
+            // Peer reconnect storms emit bursts of runtime events; coalesce them
+            // instead of serializing and parsing a full snapshot back to back.
+            val wait = lastRefreshAt + MIN_REFRESH_INTERVAL_MS - SystemClock.elapsedRealtime()
+            if (wait > 0) delay(wait)
             actions.trySend { refreshQueued = false; refresh() }
         }
     }
 
     private suspend fun refresh() {
         if (!initialized) return
+        lastRefreshAt = SystemClock.elapsedRealtime()
+        val settings = store.loadSettings()
         val snapshot = native { NativeEasyTier.collectRuntimeConfigs() }
         configs = FfiRuntimeConfig.parseSnapshot(snapshot)
         val knownIds = configs.map { it.instanceId }.toSet()
@@ -335,7 +342,7 @@ class EasyTierController private constructor(private val context: Context) {
         configServerState = configServerState.copy(running = serverActive, starting = false, stopping = false,
             connected = serverActive && native { NativeEasyTier.isConfigServerClientConnected() },
             serverUrl = serverUrl, managedNetworks = managed)
-        reconcileVpn(tunConfig, infos)
+        reconcileVpn(tunConfig, infos, settings)
         if (operationError.isNotBlank()) state = state.copy(statusText = operationError)
         val notification = when {
             vpnPermissionRequired -> "等待 VPN 授权，点击打开应用"
@@ -348,7 +355,7 @@ class EasyTierController private constructor(private val context: Context) {
         if (notification != lastNotification) { lastNotification = notification; service?.updateStatus(notification) }
     }
 
-    private suspend fun reconcileVpn(tunConfig: JSONObject, infos: JSONObject) {
+    private suspend fun reconcileVpn(tunConfig: JSONObject, infos: JSONObject, settings: AppSettings) {
         val members = configs.filter { it.instanceId in tunConfig.optJSONArray("instance_ids")?.toStringList().orEmpty() }
         val addresses = tunConfig.optJSONArray("addresses")?.toStringList().orEmpty()
         if (members.isEmpty() || addresses.isEmpty()) {
@@ -374,13 +381,15 @@ class EasyTierController private constructor(private val context: Context) {
             }
             if (cfg.mtu > 0) mtu = minOf(mtu, cfg.mtu)
             val nodes = instances.firstOrNull { it.instanceId == entry.instanceId }?.nodes.orEmpty()
-            exitRoutes = exitRoutes || (store.loadSettings().exitNodeAutoRoutes && Build.VERSION.SDK_INT >= 33 &&
+            exitRoutes = exitRoutes || (settings.exitNodeAutoRoutes && Build.VERSION.SDK_INT >= 33 &&
                 cfg.exitNodes.any { exit -> nodes.any { it.ip == exit.substringBefore('/') } })
         }
         val json = sharedVpnRequest(tunConfig, directIps, mtu, exitRoutes)
+        // Logs are only shown or exported from the UI; skip parsing them in the background.
+        val logLevel = if (foreground) CoreLogLevel.normalize(settings.coreLogLevel) else CoreLogLevel.OFF
         state = RuntimeState(running = true, statusText = "VPN 已连接",
             localCidr = addresses.joinToString(), nodes = instances.flatMap { it.nodes },
-            logs = members.flatMap { infos.optJSONObject(it.instanceName)?.let(::collectLogs).orEmpty() })
+            logs = members.flatMap { infos.optJSONObject(it.instanceName)?.let { info -> collectLogs(info, logLevel) }.orEmpty() })
         val id = "shared-vpn"
         val token = gate.select(id, json)
         if (attachedGeneration == token) return
@@ -576,8 +585,17 @@ class EasyTierController private constructor(private val context: Context) {
 
     fun updatePollingConditions(isForeground: Boolean) {
         val resumed = !foreground && isForeground
+        val backgrounded = foreground && !isForeground
         foreground = isForeground
         if (resumed) requestRefresh()
+        if (backgrounded) trimNativeHeap()
+    }
+
+    /** Releases allocator pages left behind by UI snapshots and traffic bursts. */
+    internal fun trimNativeHeap() {
+        // Only touch the native library once the runtime service has loaded it.
+        if (service == null) return
+        scope?.launch { native { NativeEasyTier.trimNativeHeap() } }
     }
 
     fun updateLogLevel(level: String) {
@@ -609,7 +627,8 @@ class EasyTierController private constructor(private val context: Context) {
     private fun collectDynamicCoreIps(info: JSONObject): Set<String> = buildSet {
         fun visit(value: Any?, key: String = "") {
             when (value) {
-                is JSONObject -> value.keys().forEach { visit(value.opt(it), it) }
+                // Event strings are log lines, not live transport endpoints.
+                is JSONObject -> value.keys().forEach { if (it != "events") visit(value.opt(it), it) }
                 is JSONArray -> for (index in 0 until value.length()) visit(value.opt(index), key)
                 is String -> if (TRANSPORT_ENDPOINT_KEY.containsMatchIn(key)) addAll(Ipv4.addressLiterals(value))
             }
@@ -617,8 +636,7 @@ class EasyTierController private constructor(private val context: Context) {
         visit(info)
     }
 
-    private fun collectLogs(info: JSONObject): List<String> {
-        val level = CoreLogLevel.normalize(store.loadSettings().coreLogLevel)
+    private fun collectLogs(info: JSONObject, level: String): List<String> {
         if (level == CoreLogLevel.OFF) return emptyList()
         val events = info.optJSONArray("events") ?: return emptyList()
         return (0 until events.length()).toList().takeLast(40).mapNotNull { index ->
@@ -634,6 +652,7 @@ class EasyTierController private constructor(private val context: Context) {
         fun get(context: Context): EasyTierController = instance ?: synchronized(this) {
             instance ?: EasyTierController(context.applicationContext).also { instance = it }
         }
+        private const val MIN_REFRESH_INTERVAL_MS = 300L
         private val TRANSPORT_ENDPOINT_KEY = Regex("(?:remote|resolved|endpoint|stun|mapped|public).*?(?:addr|address|url|endpoint)?$", RegexOption.IGNORE_CASE)
         private val IMPORTANT_CORE_LOG = Regex("error|warn|fail|panic|closed|stop|disconnect|exit|timeout", RegexOption.IGNORE_CASE)
     }

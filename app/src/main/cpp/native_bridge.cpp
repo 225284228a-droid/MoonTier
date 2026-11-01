@@ -1,10 +1,11 @@
 #include <jni.h>
+#include <dlfcn.h>
+#include <pthread.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cstdint>
 #include <deque>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,8 @@ std::deque<std::pair<int64_t, std::string>> events;
 JavaVM *javaVm = nullptr;
 jclass nativeClass = nullptr;
 jmethodID notifyMethod = nullptr;
+pthread_key_t attachedThreadKey;
+bool attachedThreadKeyReady = false;
 
 int checked(JNIEnv *env, int code)
 {
@@ -59,6 +62,24 @@ int checked(JNIEnv *env, int code)
     return code;
 }
 
+void detachAttachedThread(void *)
+{
+    if (javaVm) javaVm->DetachCurrentThread();
+}
+
+// Runtime callbacks arrive on long-lived tokio threads. Attaching once per
+// thread avoids allocating a java.lang.Thread for every peer event; the key
+// destructor detaches when the native thread exits.
+JNIEnv *callbackEnv()
+{
+    JNIEnv *env = nullptr;
+    if (javaVm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_OK) return env;
+    JavaVMAttachArgs args{JNI_VERSION_1_6, "MoonTier-native-event", nullptr};
+    if (javaVm->AttachCurrentThreadAsDaemon(&env, &args) != JNI_OK) return nullptr;
+    if (attachedThreadKeyReady) pthread_setspecific(attachedThreadKey, env);
+    return env;
+}
+
 void configServerEvent(const char *json, void *userData)
 {
     if (!json) return;
@@ -67,16 +88,11 @@ void configServerEvent(const char *json, void *userData)
         if (events.size() >= 256) events.pop_front();
         events.emplace_back(static_cast<int64_t>(reinterpret_cast<intptr_t>(userData)), json);
     }
-    JNIEnv *env = nullptr;
-    bool attached = false;
     if (!javaVm || !nativeClass || !notifyMethod) return;
-    if (javaVm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
-        if (javaVm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
-        attached = true;
-    }
+    JNIEnv *env = callbackEnv();
+    if (!env) return;
     env->CallStaticVoidMethod(nativeClass, notifyMethod);
     if (env->ExceptionCheck()) env->ExceptionClear();
-    if (attached) javaVm->DetachCurrentThread();
 }
 
 std::string toString(JNIEnv *env, jstring value)
@@ -95,11 +111,10 @@ jstring toJString(JNIEnv *env, const std::string &value)
     return env->NewStringUTF(value.c_str());
 }
 
-std::string jsonEscape(const char *raw)
+void appendJsonEscaped(std::string &out, const char *raw)
 {
-    std::string out;
     if (!raw)
-        return out;
+        return;
     for (const char *p = raw; *p; ++p) {
         switch (*p) {
         case '\\': out += "\\\\"; break;
@@ -110,7 +125,6 @@ std::string jsonEscape(const char *raw)
         default: out += *p; break;
         }
     }
-    return out;
 }
 
 } // namespace
@@ -121,6 +135,7 @@ extern "C" JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM *vm, void *)
 {
     javaVm = vm;
+    attachedThreadKeyReady = pthread_key_create(&attachedThreadKey, detachAttachedThread) == 0;
     JNIEnv *env = nullptr;
     if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
     auto cls = env->FindClass("cn/moonflow/easytier/NativeEasyTier");
@@ -211,37 +226,45 @@ Java_cn_moonflow_easytier_NativeEasyTier_collectNetworkInfos(JNIEnv *env, jclass
         return toJString(env, "{}");
 
     std::vector<KeyValuePair> infos(static_cast<size_t>(maxLength));
-    std::lock_guard<std::mutex> lock(ffiMutex);
-    const int count = collect_network_infos(infos.data(), infos.size());
-    if (checked(env, count) < 0)
-        return nullptr;
-    const int boundedCount = std::min(count, maxLength);
+    int count;
+    {
+        std::lock_guard<std::mutex> lock(ffiMutex);
+        count = collect_network_infos(infos.data(), infos.size());
+        if (checked(env, count) < 0)
+            return nullptr;
+    }
+    const auto boundedCount = static_cast<size_t>(std::min(count, maxLength));
 
-    std::ostringstream json;
-    json << "{";
+    size_t size = 2;
+    for (size_t i = 0; i < boundedCount; ++i) {
+        if (infos[i].key) size += std::char_traits<char>::length(infos[i].key) + 4;
+        if (infos[i].value) size += std::char_traits<char>::length(infos[i].value);
+    }
+    std::string json;
+    json.reserve(size + 16);
+    json += '{';
     bool first = true;
-    for (int i = 0; i < boundedCount; ++i) {
-        if (!infos[static_cast<size_t>(i)].key)
+    for (size_t i = 0; i < boundedCount; ++i) {
+        if (!infos[i].key)
             continue;
         if (!first)
-            json << ",";
+            json += ',';
         first = false;
-        json << "\"" << jsonEscape(infos[static_cast<size_t>(i)].key) << "\":";
-        if (infos[static_cast<size_t>(i)].value)
-            json << infos[static_cast<size_t>(i)].value;
-        else
-            json << "null";
+        json += '"';
+        appendJsonEscaped(json, infos[i].key);
+        json += "\":";
+        json += infos[i].value ? infos[i].value : "null";
     }
-    json << "}";
+    json += '}';
 
-    for (int i = 0; i < boundedCount; ++i) {
-        if (infos[static_cast<size_t>(i)].key)
-            free_string(infos[static_cast<size_t>(i)].key);
-        if (infos[static_cast<size_t>(i)].value)
-            free_string(infos[static_cast<size_t>(i)].value);
+    for (size_t i = 0; i < boundedCount; ++i) {
+        if (infos[i].key)
+            free_string(infos[i].key);
+        if (infos[i].value)
+            free_string(infos[i].value);
     }
 
-    return toJString(env, json.str());
+    return toJString(env, json);
 }
 
 // --- setTunFd ---
@@ -303,17 +326,20 @@ Java_cn_moonflow_easytier_NativeEasyTier_listInstances(JNIEnv *env, jclass, jint
     std::lock_guard<std::mutex> lock(ffiMutex);
     const int count = list_instance(values.data(), values.size());
     if (checked(env, count) < 0) return nullptr;
-    std::ostringstream json;
-    json << "{";
+    std::string json = "{";
     for (int i = 0; i < std::min(count, maximum); ++i) {
         const auto &entry = values[static_cast<size_t>(i)];
-        if (i) json << ",";
-        json << "\"" << jsonEscape(entry.key) << "\":\"" << jsonEscape(entry.value) << "\"";
+        if (i) json += ',';
+        json += '"';
+        appendJsonEscaped(json, entry.key);
+        json += "\":\"";
+        appendJsonEscaped(json, entry.value);
+        json += '"';
         if (entry.key) free_string(entry.key);
         if (entry.value) free_string(entry.value);
     }
-    json << "}";
-    return toJString(env, json.str());
+    json += '}';
+    return toJString(env, json);
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -374,18 +400,24 @@ Java_cn_moonflow_easytier_NativeEasyTier_isConfigServerClientConnected(JNIEnv *,
 extern "C" JNIEXPORT jstring JNICALL
 Java_cn_moonflow_easytier_NativeEasyTier_drainConfigServerEvents(JNIEnv *env, jclass)
 {
-    std::lock_guard<std::mutex> lock(eventMutex);
-    std::ostringstream json;
-    json << "[";
-    bool first = true;
-    for (const auto &entry : events) {
-        if (!first) json << ",";
-        first = false;
-        json << "{\"generation\":" << entry.first << ",\"payload\":" << entry.second << "}";
+    std::deque<std::pair<int64_t, std::string>> drained;
+    {
+        std::lock_guard<std::mutex> lock(eventMutex);
+        drained.swap(events);
     }
-    events.clear();
-    json << "]";
-    return toJString(env, json.str());
+    std::string json = "[";
+    bool first = true;
+    for (const auto &entry : drained) {
+        if (!first) json += ',';
+        first = false;
+        json += "{\"generation\":";
+        json += std::to_string(entry.first);
+        json += ",\"payload\":";
+        json += entry.second;
+        json += '}';
+    }
+    json += ']';
+    return toJString(env, json);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -429,4 +461,15 @@ Java_cn_moonflow_easytier_NativeEasyTier_attachSharedTunFd(JNIEnv *env, jclass, 
 {
     std::lock_guard<std::mutex> lock(ffiMutex);
     return checked(env, attach_shared_tun_fd(fd));
+}
+
+// Returns pages freed by the Rust runtime to the kernel after traffic spikes.
+extern "C" JNIEXPORT void JNICALL
+Java_cn_moonflow_easytier_NativeEasyTier_trimNativeHeap(JNIEnv *, jclass)
+{
+    using Mallopt = int (*)(int, int);
+    static const auto mallopt = reinterpret_cast<Mallopt>(dlsym(RTLD_DEFAULT, "mallopt"));
+    if (!mallopt) return;
+    // M_PURGE_ALL (-104) is newer than M_PURGE (-101); both return 0 when unsupported.
+    if (mallopt(-104, 0) == 0) mallopt(-101, 0);
 }
