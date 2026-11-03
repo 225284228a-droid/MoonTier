@@ -22,17 +22,17 @@ gradle assembleRelease
 APK 输出目录为 `app/build/outputs/apk/`。
 
 如需签名发行版，将 `keystore.properties.example` 复制为 `keystore.properties`，
-填入自己的密钥路径和签名参数。不配置时，debug 使用默认调试签名，release 生成未签名 APK；
-配置后 debug 和 release 使用所配置的签名。请勿提交私钥和密码。
+填入自己的密钥路径和签名参数。配置后 debug 和 release 使用所配置的签名；
+不配置时两个版本都使用默认调试签名，产物可以直接安装。请勿提交私钥和密码。
 
 ### GitHub Actions
 
-`.github/workflows/android.yml` 在推送 `master`、提交 PR 或手动触发时运行单元测试并构建 debug/release APK，
-APK 作为构建产物（Artifacts）上传。推送 `v*` 标签（如 `git tag v1.0.0 && git push origin v1.0.0`）时，
-还会创建同名 GitHub Release 并附带 APK。
+`.github/workflows/android.yml` 在推送 `master`、提交 PR 或手动触发时运行单元测试并只构建 release APK，
+APK 以 `archive: false` 上传，携带文件名作为单独文件（不是 zip 包）出现在构建产物（Artifacts）里。
+推送 `v*` 标签（如 `git tag v1.0.0 && git push origin v1.0.0`）时，还会创建同名 GitHub Release 并附带该 APK。
 
 发行版签名为可选项，在仓库 Secrets 中配置 `ANDROID_KEYSTORE_BASE64`（`base64 -w0 your.keystore` 的输出）、
-`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 后生效；未配置时 release APK 为未签名版本。
+`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 后生效；未配置时 release APK 用调试签名。
 
 Root manager 的源码与构建说明见 [tools/root-manager-client](tools/root-manager-client/README.md)。
 FFI 核心的固定源码版本、Android 适配补丁及构建步骤见 [tools/ffi-runtime](tools/ffi-runtime/README.md)。

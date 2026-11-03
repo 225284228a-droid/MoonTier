@@ -34,8 +34,8 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
-      # Optional release signing. Without these secrets the release APK stays
-      # unsigned and the debug APK (debug key) is the installable build.
+      # Optional release signing. Without these secrets Gradle falls back to the
+      # debug key, so the release APK is still installable.
       - name: Configure release signing
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -44,7 +44,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "Signing secrets not set; building unsigned release."
+            echo "Signing secrets not set; release APK falls back to the debug key."
             exit 0
           fi
           echo "$KEYSTORE_BASE64" | base64 -d > ci-release.keystore
@@ -56,23 +56,22 @@ jobs:
           } > keystore.properties
 
       - name: Build and test
-        run: gradle --no-daemon testDebugUnitTest assembleDebug assembleRelease
+        run: gradle --no-daemon testReleaseUnitTest assembleRelease
 
-      - name: Collect APKs
+      - name: Collect APK
         run: |
           mkdir -p dist
-          name="moontier-${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}"
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/$name-debug.apk"
-          for apk in app/build/outputs/apk/release/*.apk; do
-            suffix=$(basename "$apk" .apk | sed 's/^app-//')
-            cp "$apk" "dist/$name-$suffix.apk"
-          done
+          apk=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+          cp "$apk" "dist/moontier-${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}.apk"
           ls -l dist
+          sha256sum dist/*.apk
 
-      - uses: actions/upload-artifact@v4
+      # archive: false uploads the APK as-is, so it downloads as a plain .apk
+      # instead of being wrapped in a zip. The artifact takes the file name.
+      - uses: actions/upload-artifact@v7
         with:
-          name: moontier-apk-${{ github.sha }}
           path: dist/*.apk
+          archive: false
           if-no-files-found: error
 
       - name: Publish GitHub release

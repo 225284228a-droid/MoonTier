@@ -51,7 +51,8 @@ android {
             if (hasReleaseSigning) signingConfig = signingConfigs.release
         }
         release {
-            if (hasReleaseSigning) signingConfig = signingConfigs.release
+            // 未配置发行签名时回退到调试签名，避免产出装不上的未签名 APK。
+            signingConfig = hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
             minifyEnabled = false
         }
     }
