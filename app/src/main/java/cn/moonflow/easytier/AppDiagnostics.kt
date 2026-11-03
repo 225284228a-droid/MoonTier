@@ -19,16 +19,22 @@ object CoreLogLevel {
         else -> OFF
     }
 
+    // The config-server client is the only core subsystem whose log lines drive
+    // UI state, so its target stays at info even when user-facing logs are off.
+    private const val CONFIG_SERVER_LOG_TARGET =
+        "easytier_core::management::full::web_client=info,easytier::web_client=info"
+
     fun rustLevel(value: String): String = when (normalize(value)) {
         DEBUG -> "debug"
         NORMAL -> "warn"
-        else -> "off"
+        // Off still has to admit the status target; RUST_LOG narrows the output.
+        else -> "info"
     }
 
     fun rustFilter(value: String): String = when (normalize(value)) {
         DEBUG -> "CORE=debug,easytier=debug"
-        NORMAL -> "CORE=warn,easytier=warn"
-        else -> "off"
+        NORMAL -> "CORE=warn,easytier=warn,$CONFIG_SERVER_LOG_TARGET"
+        else -> "off,$CONFIG_SERVER_LOG_TARGET"
     }
 
     fun label(value: String): String = when (normalize(value)) {

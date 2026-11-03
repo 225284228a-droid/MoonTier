@@ -25,6 +25,10 @@ import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
 
+// Bump when the manager launch environment changes so an inherited root process
+// is restarted once on the next app start.
+private const val MANAGER_ENV_VERSION = 2
+
 class RootTierController(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val coreManager = RootCoreManager(context)
@@ -46,7 +50,7 @@ class RootTierController(private val context: Context) {
     private var operationGeneration = 0L
     @Volatile private var shutdownGeneration = 0L
     private var lastRootPlan = RootRoutingPlan(emptyList())
-    @Volatile private var managerLogTail: Pair<ManagerLogTailKey, List<String>>? = null
+    @Volatile private var managerLogTail: Pair<ManagerLogTailKey, ManagerLogSnapshot>? = null
 
     var state by mutableStateOf(RootTierState())
         private set
@@ -97,16 +101,22 @@ class RootTierController(private val context: Context) {
         if (isForeground) pollWake.trySend(Unit)
     }
 
-    fun diagnosticLogTail(): List<String> = readManagerLogTail(loadManagerOptions())
+    fun diagnosticLogTail(): List<String> = readManagerLog(loadManagerOptions()).lines
 
     fun updateLogLevel(level: String) {
-        if (CoreLogLevel.normalize(level) == CoreLogLevel.OFF) {
-            managerLogFile.delete()
-            state = state.copy(
-                instances = state.instances.map { it.copy(logs = emptyList()) },
-                configServer = state.configServer.copy(logs = emptyList())
-            )
+        managerLogTail = null
+        if (CoreLogLevel.normalize(level) != CoreLogLevel.OFF) return
+        // Keep a small tail: it carries the config-server lifecycle markers that
+        // drive the connection status, while user-facing logs are hidden.
+        runCatching {
+            if (managerLogFile.exists() && managerLogFile.length() > MANAGER_STATUS_LOG_BYTES) {
+                managerLogFile.writeText(readFileTail(managerLogFile, MANAGER_STATUS_LOG_BYTES))
+            }
         }
+        state = state.copy(
+            instances = state.instances.map { it.copy(logs = emptyList()) },
+            configServer = state.configServer.copy(logs = emptyList())
+        )
     }
 
     fun checkCoreUpdate() {
@@ -511,14 +521,25 @@ class RootTierController(private val context: Context) {
     private fun initializeBlocking(): RefreshedState {
         val legacyConfigServerWasRunning = migrateLegacyProcesses()
         val settings = store.loadSettings()
-        var options = loadManagerOptions() ?: optionsFromSettings(
+        val stored = loadManagerOptions()
+        var options = stored ?: optionsFromSettings(
             settings,
             enabled = legacyConfigServerWasRunning || settings.configServerAutoConnect
         )
         if (legacyConfigServerWasRunning && !options.configServerEnabled) {
             options = optionsFromSettings(settings, enabled = true)
-            saveManagerOptions(options)
         }
+        // A manager inherited from an older app build may not emit the log target
+        // that reports config-server connectivity; restart it once to apply the
+        // current launch environment.
+        if (managerAlive() && stored?.environmentVersion != MANAGER_ENV_VERSION) {
+            AppDiagnostics.event("root", "restarting manager for environment $MANAGER_ENV_VERSION")
+            stopManagerBlocking()
+        }
+        if (options.environmentVersion != MANAGER_ENV_VERSION) {
+            options = options.copy(environmentVersion = MANAGER_ENV_VERSION)
+        }
+        saveManagerOptions(options)
 
         if (
             !managerAlive() &&
@@ -606,7 +627,7 @@ class RootTierController(private val context: Context) {
 
     private fun stopConfigServerBlocking(): RefreshedState {
         val current = loadManagerOptions() ?: optionsFromSettings(store.loadSettings(), enabled = false)
-        val desired = current.copy(configServerEnabled = false, resolvedConfigServerUrl = "")
+        val desired = current.copy(configServerEnabled = false)
         saveManagerOptions(desired)
         if (managerAlive()) {
             restartManagerForOptions(desired)
@@ -638,25 +659,11 @@ class RootTierController(private val context: Context) {
             throw IllegalStateException(managerError(probe, "共享 manager RPC 不可用"))
         }
 
-        val options = if (requested.configServerEnabled) {
-            requested.copy(
-                resolvedConfigServerUrl = resolveConfigServerEndpoint(
-                    requested.rawConfigServerUrl,
-                    store
-                )
-            )
-        } else {
-            requested.copy(resolvedConfigServerUrl = "")
-        }
-        saveManagerOptions(options)
+        saveManagerOptions(requested)
         managerPidFile.delete()
 
         val logLevel = store.loadSettings().coreLogLevel
-        val managerLogPath = if (CoreLogLevel.normalize(logLevel) == CoreLogLevel.OFF) {
-            "/dev/null"
-        } else {
-            managerLogFile.absolutePath
-        }
+        val managerLogPath = managerLogFile.absolutePath
         val command = buildString {
             append("RUST_LOG=")
             append(shq(CoreLogLevel.rustFilter(logLevel)))
@@ -676,14 +683,14 @@ class RootTierController(private val context: Context) {
             append(" --rpc-portal ")
             append(shq(MANAGER_RPC_PORTAL))
             append(" --daemon")
-            if (options.configServerEnabled) {
+            if (requested.configServerEnabled) {
                 append(" --config-server ")
-                append(shq(options.resolvedConfigServerUrl))
+                append(shq(requested.rawConfigServerUrl))
                 append(" --machine-id ")
-                append(shq(options.machineId))
+                append(shq(requested.machineId))
                 append(" --hostname ")
-                append(shq(options.hostname))
-                if (options.secureMode) append(" --secure-mode")
+                append(shq(requested.hostname))
+                if (requested.secureMode) append(" --secure-mode")
             }
         }
         val result = RootManager.su(command, timeoutMs = 20000)
@@ -911,23 +918,15 @@ class RootTierController(private val context: Context) {
                 )
             }
 
-        val logs = readManagerLogTail(options)
-        val connectedAt = logs.indexOfLast {
-            it.contains("Successfully connected", ignoreCase = true) ||
-                it.contains("connected to config server", ignoreCase = true)
-        }
-        val disconnectedAt = logs.indexOfLast {
-            it.contains("Failed to connect", ignoreCase = true) ||
-                it.contains("connection closed", ignoreCase = true) ||
-                it.contains("disconnected", ignoreCase = true)
-        }
+        val log = if (options.configServerEnabled) readManagerLog(options) else ManagerLogSnapshot()
         val configServer = RootConfigServerState(
             pid = pid,
             running = options.configServerEnabled,
-            connected = options.configServerEnabled && connectedAt >= 0 && connectedAt > disconnectedAt,
+            connected = options.configServerEnabled && log.status.connected,
             serverUrl = options.rawConfigServerUrl,
             managedNetworks = managed,
-            logs = logs
+            logs = log.lines,
+            error = if (options.configServerEnabled) log.status.error else ""
         )
         return RefreshedState(instances, configServer)
     }
@@ -973,18 +972,14 @@ class RootTierController(private val context: Context) {
     }
 
     private fun runtimeRootConfig(config: NetworkConfig): NetworkConfig {
-        var runtime = config.copy(
+        val runtime = config.copy(
             hostname = effectiveHostname(config),
             rpcPortal = ""
         )
-        runtime = runtime.copy(
-            peerUrls = resolveRootEndpoints(runtime.peerUrls, store),
-            stunServers = resolveRootEndpoints(runtime.stunServers, store)
-        )
-        if (!store.loadSettings().exitNodeAutoRoutes) {
-            runtime = runtime.copy(exitNodes = emptyList())
-        }
-        return runtime
+        // Hostnames stay untouched: the core resolves peers, STUN servers and the
+        // config-server endpoint itself, including after KSU/Magisk changes.
+        return if (store.loadSettings().exitNodeAutoRoutes) runtime
+        else runtime.copy(exitNodes = emptyList())
     }
 
     private fun prepareEnabledLocalConfigs() {
@@ -1045,8 +1040,8 @@ class RootTierController(private val context: Context) {
 
     private fun managerError(result: ShellResult, fallback: String): String {
         val output = result.output.lineSequence().lastOrNull { it.isNotBlank() }.orEmpty()
-        val log = readManagerLogTail(loadManagerOptions()).lastOrNull().orEmpty()
-        return output.ifBlank { log }.ifBlank { fallback }
+        val log = readManagerLog(loadManagerOptions())
+        return output.ifBlank { log.lines.lastOrNull().orEmpty() }.ifBlank { fallback }
     }
 
     private fun managerAlive(): Boolean = isAlive(managerPid())
@@ -1095,10 +1090,10 @@ class RootTierController(private val context: Context) {
             configServerEnabled = obj.optBoolean("config_server_enabled", false) &&
                 isFullConfigServerUrl(rawUrl),
             rawConfigServerUrl = rawUrl,
-            resolvedConfigServerUrl = obj.optString("resolved_config_server_url"),
             hostname = obj.optString("hostname"),
             machineId = obj.optString("machine_id"),
-            secureMode = obj.optBoolean("secure_mode", true)
+            secureMode = obj.optBoolean("secure_mode", true),
+            environmentVersion = obj.optInt("environment_version", 0)
         )
     }
 
@@ -1107,10 +1102,10 @@ class RootTierController(private val context: Context) {
             JSONObject()
                 .put("config_server_enabled", options.configServerEnabled)
                 .put("raw_config_server_url", options.rawConfigServerUrl)
-                .put("resolved_config_server_url", options.resolvedConfigServerUrl)
                 .put("hostname", options.hostname)
                 .put("machine_id", options.machineId)
                 .put("secure_mode", options.secureMode)
+                .put("environment_version", options.environmentVersion)
                 .toString()
         )
     }
@@ -1134,24 +1129,27 @@ class RootTierController(private val context: Context) {
         )
     }
 
-    private fun readManagerLogTail(options: ManagerOptions?): List<String> {
-        if (CoreLogLevel.normalize(store.loadSettings().coreLogLevel) == CoreLogLevel.OFF) return emptyList()
-        if (!managerLogFile.exists()) return emptyList()
+    private fun readManagerLog(options: ManagerOptions?): ManagerLogSnapshot {
+        if (!managerLogFile.exists()) return ManagerLogSnapshot()
         trimManagerLog()
         val rawUrl = options?.rawConfigServerUrl.orEmpty()
-        val resolvedUrl = options?.resolvedConfigServerUrl.orEmpty()
-        val key = ManagerLogTailKey(managerLogFile.length(), managerLogFile.lastModified(), rawUrl, resolvedUrl)
+        val key = ManagerLogTailKey(managerLogFile.length(), managerLogFile.lastModified(), rawUrl)
         managerLogTail?.takeIf { it.first == key }?.let { return it.second }
-        // Only the last 80 lines are shown, so never decode the whole log every poll.
         val lines = runCatching { readFileTail(managerLogFile, MANAGER_LOG_TAIL_BYTES) }
             .getOrDefault("")
             .lineSequence()
             .filter { it.isNotBlank() }
-            .map { redactConfigServerToken(it, rawUrl, resolvedUrl) }
+            .map { redactConfigServerToken(it, rawUrl) }
             .toList()
-            .takeLast(80)
-        managerLogTail = key to lines
-        return lines
+        // The status scan needs the whole tail; only the newest lines are shown.
+        val display = if (CoreLogLevel.normalize(store.loadSettings().coreLogLevel) == CoreLogLevel.OFF) {
+            emptyList()
+        } else {
+            lines.takeLast(80)
+        }
+        val snapshot = ManagerLogSnapshot(display, configServerLogStatus(lines))
+        managerLogTail = key to snapshot
+        return snapshot
     }
 
     private fun trimManagerLog() {
@@ -1182,11 +1180,9 @@ class RootTierController(private val context: Context) {
         else -> logs
     }
 
-    private fun redactConfigServerToken(line: String, rawUrl: String, resolvedUrl: String): String {
+    private fun redactConfigServerToken(line: String, rawUrl: String): String {
         var redacted = line
-        listOf(rawUrl, resolvedUrl)
-            .filter { it.isNotBlank() }
-            .forEach { value -> redacted = redacted.replace(value, sanitizeConfigServerUrl(value)) }
+        if (rawUrl.isNotBlank()) redacted = redacted.replace(rawUrl, sanitizeConfigServerUrl(rawUrl))
         return CONFIG_SERVER_TOKEN_REGEX.replace(redacted, "\$1***")
     }
 
@@ -1240,41 +1236,6 @@ class RootTierController(private val context: Context) {
             ?: "Android-${fallbackId.take(8)}"
     }
 
-    private fun resolveRootEndpoints(values: List<String>, store: ConfigStore): List<String> =
-        values.flatMap { endpoint ->
-            val host = Ipv4.hostFromUrl(endpoint)
-            if (host.isBlank() || Ipv4.parseAddress(host) != null || host.contains(':')) {
-                listOf(endpoint)
-            } else {
-                val addresses = store.resolveHostIps(host).filter { Ipv4.parseAddress(it) != null }
-                if (addresses.isEmpty()) listOf(endpoint) else addresses.map {
-                    replaceEndpointHost(endpoint, host, it)
-                }
-            }
-        }.cleanItems()
-
-    private fun replaceEndpointHost(endpoint: String, host: String, address: String): String {
-        val authorityStart = endpoint.indexOf("://").let { if (it >= 0) it + 3 else 0 }
-        val hostStart = endpoint.indexOf(host, authorityStart)
-        if (hostStart < 0) return endpoint
-        return endpoint.substring(0, hostStart) + address + endpoint.substring(hostStart + host.length)
-    }
-
-    private fun resolveConfigServerEndpoint(raw: String, store: ConfigStore): String {
-        val trimmed = raw.trim()
-        if (!isFullConfigServerUrl(trimmed)) {
-            throw IllegalArgumentException("请填写完整配置服务器 URL，例如 udp://host:22020/admin")
-        }
-        val expanded = trimmed
-        val scheme = expanded.substringBefore("://", "").lowercase()
-        if (scheme == "ws" || scheme == "wss") return expanded
-        val host = Ipv4.hostFromUrl(expanded)
-        if (host.isBlank() || Ipv4.parseAddress(host) != null || host.contains(':')) return expanded
-        val address = store.resolveHostIps(host).firstOrNull { Ipv4.parseAddress(it) != null }
-            ?: return expanded
-        return replaceEndpointHost(expanded, host, address)
-    }
-
     private fun isFullConfigServerUrl(value: String): Boolean =
         value.trim().contains("://")
 
@@ -1286,10 +1247,10 @@ class RootTierController(private val context: Context) {
     private data class ManagerOptions(
         val configServerEnabled: Boolean = false,
         val rawConfigServerUrl: String = "",
-        val resolvedConfigServerUrl: String = "",
         val hostname: String = "",
         val machineId: String = "",
-        val secureMode: Boolean = true
+        val secureMode: Boolean = true,
+        val environmentVersion: Int = MANAGER_ENV_VERSION
     ) {
         fun sameLaunchOptions(other: ManagerOptions): Boolean =
             configServerEnabled == other.configServerEnabled &&
@@ -1321,8 +1282,12 @@ class RootTierController(private val context: Context) {
     private data class ManagerLogTailKey(
         val length: Long,
         val modifiedAt: Long,
-        val rawUrl: String,
-        val resolvedUrl: String
+        val rawUrl: String
+    )
+
+    private data class ManagerLogSnapshot(
+        val lines: List<String> = emptyList(),
+        val status: ConfigServerLogStatus = ConfigServerLogStatus()
     )
 
     private data class ParsedInstanceInfo(
@@ -1349,6 +1314,7 @@ class RootTierController(private val context: Context) {
         private const val TAG = "MoonTierRoot"
         private const val MAX_MANAGER_LOG_BYTES = 512 * 1024
         private const val MANAGER_LOG_TAIL_BYTES = 32 * 1024
+        private const val MANAGER_STATUS_LOG_BYTES = 8 * 1024
         private val IMPORTANT_CORE_LOG = Regex(
             "error|warn|fail|panic|closed|stop|disconnect|exit|timeout",
             RegexOption.IGNORE_CASE

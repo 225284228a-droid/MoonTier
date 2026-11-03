@@ -21,15 +21,6 @@ object Ipv4 {
         return out
     }
 
-    fun hostFromUrl(value: String): String {
-        val trimmed = value.trim()
-        return trimmed
-            .substringAfter("://", trimmed)
-            .substringBefore("/")
-            .substringBeforeLast(":", trimmed)
-            .trim('[', ']')
-    }
-
     fun addressLiterals(value: String): Set<String> =
         addressLiteralPattern.findAll(value)
             .map { it.groupValues[1] }

@@ -140,3 +140,29 @@ replacing a live Root core, and full visual/theme acceptance were not exercised.
 - `gradle testDebugUnitTest assembleDebug --offline` passed: 25 tests, zero
   failures, including the updated codec checks for default omission, numeric
   compression, and compact round trips.
+
+## Config-server status and hostname resolution (2026-11-04)
+
+- Root mode no longer resolves config-server, peer or STUN hostnames to IPv4 in
+  the app before launch. The core receives the configured URLs unchanged and
+  resolves them itself; upstream fixed the post-KSU resolution failure in
+  `#1761` and bounded the system-resolver fallback in `#2310`.
+- The shared manager now always writes its console log to the bounded
+  `manager.log` instead of `/dev/null`, and `RUST_LOG` keeps the config-server
+  client target at `info` even when user-facing core logs are off. The client
+  lifecycle is the only core state that drives UI, so this small stream is
+  retained while the log panel stays empty at the off level.
+- Connection state is derived from the whole 32 KiB log tail (newest marker
+  wins) and covers both current (`connected to config server`) and pre-2.7
+  (`Successfully connected`) wordings plus secure-mode/heartbeat failures. A
+  failure is surfaced as `连接失败` in the status card; a later reconnect clears
+  it. Previously the state was derived only from the newest 80 logged lines at
+  non-off levels, so default settings could never show `已连接`.
+- `manager.json` now records the manager launch-environment version. A root
+  manager inherited from an older app build is restarted once on the next start
+  so it runs with the new status-log filter.
+- `gradle testDebugUnitTest assembleDebug --offline` passed: 53 tests, zero
+  failures. New cases cover both log wordings, failure/reconnect ordering,
+  secure-mode and heartbeat failures, peer failures that must not flip the
+  state, and the off/normal/debug `RUST_LOG` filters. No device was attached,
+  so the Root config-server connection itself was not re-tested on-device.

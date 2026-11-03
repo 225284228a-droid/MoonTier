@@ -1314,8 +1314,8 @@ private fun ServersPage(
                         configServer.stopping -> "正在断开"
                         configServer.starting -> "正在启动"
                         configServer.connected -> "已连接"
-                        configServer.running -> "正在连接"
                         configServer.error.isNotBlank() -> "连接失败"
+                        configServer.running -> "正在连接"
                         else -> "未连接"
                     }
                     val statusColor = when {
