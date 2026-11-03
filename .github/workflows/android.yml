@@ -56,7 +56,7 @@ jobs:
           } > keystore.properties
 
       - name: Build and test
-        run: gradle --no-daemon testReleaseUnitTest assembleRelease
+        run: gradle --no-daemon test assembleRelease
 
       - name: Collect APK
         run: |
